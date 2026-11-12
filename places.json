@@ -1,0 +1,107 @@
+{
+  "match_radius_km": 2.0,
+  "room_numbers": ["1", "2", "3", "4", "5"],
+  "teams": [
+    "Team 1",
+    "Team 2",
+    "Team 3",
+    "Team 4",
+    "Team 5",
+    "Team 6",
+    "Team 7",
+    "Team 8",
+    "Team 9",
+    "Team 10",
+    "Team 11",
+    "Team 12",
+    "Team 13",
+    "Team 14",
+    "Team 15"
+  ],
+  "rounds": [1],
+  "places": [
+    {
+      "name": "Taj Mahal",
+      "locations": [{ "name": "Taj Mahal", "latitude": 27.1751, "longitude": 78.0421 }]
+    },
+    {
+      "name": "Red Fort",
+      "locations": [{ "name": "Red Fort", "latitude": 28.6562, "longitude": 77.2410 }]
+    },
+    {
+      "name": "Qutub Minar",
+      "locations": [{ "name": "Qutub Minar", "latitude": 28.5245, "longitude": 77.1855 }]
+    },
+    {
+      "name": "India Gate",
+      "locations": [{ "name": "India Gate", "latitude": 28.6129, "longitude": 77.2295 }]
+    },
+    {
+      "name": "Golden Temple",
+      "locations": [{ "name": "Golden Temple", "latitude": 31.6200, "longitude": 74.8765 }]
+    },
+    {
+      "name": "Gateway of India",
+      "locations": [{ "name": "Gateway of India", "latitude": 18.9220, "longitude": 72.8347 }]
+    },
+    {
+      "name": "Hawa Mahal",
+      "locations": [{ "name": "Hawa Mahal", "latitude": 26.9239, "longitude": 75.8267 }]
+    },
+    {
+      "name": "Amer Fort",
+      "locations": [{ "name": "Amer Fort", "latitude": 26.9855, "longitude": 75.8513 }]
+    },
+    {
+      "name": "Charminar",
+      "locations": [{ "name": "Charminar", "latitude": 17.3616, "longitude": 78.4747 }]
+    },
+    {
+      "name": "Ajanta Ellora Caves",
+      "locations": [
+        { "name": "Ajanta Caves", "latitude": 20.5519, "longitude": 75.7033 },
+        { "name": "Ellora Caves", "latitude": 20.0268, "longitude": 75.1790 }
+      ]
+    },
+    {
+      "name": "Mysore Palace",
+      "locations": [{ "name": "Mysore Palace", "latitude": 12.3052, "longitude": 76.6552 }]
+    },
+    {
+      "name": "Victoria Memorial",
+      "locations": [{ "name": "Victoria Memorial", "latitude": 22.5448, "longitude": 88.3426 }]
+    },
+    {
+      "name": "Sun Temple (Konark)",
+      "locations": [{ "name": "Sun Temple (Konark)", "latitude": 19.8876, "longitude": 86.0945 }]
+    },
+    {
+      "name": "Hampi Ruins",
+      "locations": [{ "name": "Hampi Ruins", "latitude": 15.3350, "longitude": 76.4600 }]
+    },
+    {
+      "name": "Mahabodhi Temple",
+      "locations": [{ "name": "Mahabodhi Temple", "latitude": 24.6959, "longitude": 84.9911 }]
+    },
+    {
+      "name": "Sanchi",
+      "locations": [{ "name": "Sanchi", "latitude": 23.4793, "longitude": 77.7397 }]
+    },
+    {
+      "name": "Kohima War Cemetery",
+      "locations": [{ "name": "Kohima War Cemetery", "latitude": 25.6746, "longitude": 94.1086 }]
+    },
+    {
+      "name": "Mehrangarh Fort",
+      "locations": [{ "name": "Mehrangarh Fort", "latitude": 26.2970, "longitude": 73.0180 }]
+    },
+    {
+      "name": "Bundi Stepwells",
+      "locations": [{ "name": "Raniji ki Baori, Bundi", "latitude": 25.4442, "longitude": 75.6381 }]
+    },
+    {
+      "name": "Nalanda",
+      "locations": [{ "name": "Nalanda", "latitude": 25.1361, "longitude": 85.4439 }]
+    }
+  ]
+}
