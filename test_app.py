@@ -5,12 +5,19 @@ from unittest.mock import patch
 
 from app import (
     create_riddle_image,
+    finish_team_timer,
     find_nearest_place,
     get_or_assign_place,
+    get_team_timer,
     haversine_km,
+    load_config,
+    format_elapsed_time,
     room_for_assigned_coordinates,
     room_group_index,
+    start_team_timer,
     validate_coordinates,
+    validate_config,
+    verify_admin_credentials,
 )
 
 
@@ -109,6 +116,42 @@ class CoordinateLookupTests(unittest.TestCase):
         self.assertEqual(image.mode, "RGB")
         self.assertEqual(image.width, 1200)
         self.assertGreater(image.height, 200)
+
+    def test_backend_config_passes_admin_save_validation(self):
+        validate_config(load_config())
+
+    def test_admin_login_requires_both_credentials(self):
+        self.assertTrue(
+            verify_admin_credentials("admin", "secret", "admin", "secret")
+        )
+        self.assertFalse(
+            verify_admin_credentials("admin", "wrong", "admin", "secret")
+        )
+        self.assertFalse(
+            verify_admin_credentials("other", "secret", "admin", "secret")
+        )
+
+    def test_team_timer_persists_and_finishes_only_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("app.ASSIGNMENT_DB_PATH", Path(directory) / "timers.sqlite3"):
+                with patch("app.time.time", return_value=1000):
+                    started = start_team_timer("Team 1")
+                with patch("app.time.time", return_value=1050):
+                    resumed = start_team_timer("Team 1")
+                    finished = finish_team_timer("Team 1")
+                with patch("app.time.time", return_value=1100):
+                    still_finished = finish_team_timer("Team 1")
+                persisted = get_team_timer("Team 1")
+
+        self.assertEqual(started, (1000, None))
+        self.assertEqual(resumed, started)
+        self.assertEqual(finished, (1000, 1050))
+        self.assertEqual(still_finished, finished)
+        self.assertEqual(persisted, finished)
+
+    def test_elapsed_time_uses_hours_minutes_and_seconds(self):
+        self.assertEqual(format_elapsed_time(3661), "01:01:01")
+        self.assertEqual(format_elapsed_time(-1), "00:00:00")
 
 
 if __name__ == "__main__":
