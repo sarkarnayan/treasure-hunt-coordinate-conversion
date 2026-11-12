@@ -1,6 +1,5 @@
 {
   "match_radius_km": 2.0,
-  "room_numbers": ["1", "2", "3", "4", "5"],
   "teams": [
     "Team 1",
     "Team 2",
@@ -18,90 +17,264 @@
     "Team 14",
     "Team 15"
   ],
-  "rounds": [1, 2],
+  "round_penalties": {
+    "4": {
+      "free_attempts": 3,
+      "penalty_seconds": 120
+    },
+    "5": {
+      "penalty_seconds": 120
+    },
+    "6": {
+      "free_attempts": 3,
+      "penalty_seconds": 120
+    }
+  },
   "places": [
     {
       "name": "Taj Mahal",
-      "locations": [{ "name": "Taj Mahal", "latitude": 27.1751, "longitude": 78.0421 }]
+      "locations": [
+        {
+          "name": "Taj Mahal",
+          "latitude": 27.1751,
+          "longitude": 78.0421
+        }
+      ],
+      "puzzle": "Symmetry I keep in all but one small thing:\nA second sleeper broke my perfect plan.\nBeside a bending river I do cling,\nAnd lesser tombs have called me sister, when they can.",
+      "room_number": "1"
     },
     {
       "name": "Red Fort",
-      "locations": [{ "name": "Red Fort", "latitude": 28.6562, "longitude": 77.2410 }]
+      "locations": [
+        {
+          "name": "Red Fort",
+          "latitude": 28.6562,
+          "longitude": 77.241
+        }
+      ],
+      "puzzle": "Red-coated twin am I, but not alone;\nMy elder cousin wears the same attire.\nMy greatest gate doth face a city not my own,\nAnd one who moved his throne raised me up higher.",
+      "room_number": "1"
     },
     {
       "name": "Qutub Minar",
-      "locations": [{ "name": "Qutub Minar", "latitude": 28.5245, "longitude": 77.1855 }]
+      "locations": [
+        {
+          "name": "Qutub Minar",
+          "latitude": 28.5245,
+          "longitude": 77.1855
+        }
+      ],
+      "puzzle": "Some say I called the faithful, others, crowed of war;\nMine tiers each wear a different garb of stone.\nNone may ascend my stair, since a crowded day of sorrow,\nYet ancient words climb up my sides, alone.",
+      "room_number": "1"
     },
     {
       "name": "India Gate",
-      "locations": [{ "name": "India Gate", "latitude": 28.6129, "longitude": 77.2295 }]
+      "locations": [
+        {
+          "name": "India Gate",
+          "latitude": 28.6129,
+          "longitude": 77.2295
+        }
+      ],
+      "puzzle": "A gate through which no door doth ever swing,\nI bear the names of those who fell abroad.\nThough \"gate\" is part of both our names, I bring\nNo harbour to my feet. Mine is a road.",
+      "room_number": "1"
     },
     {
       "name": "Golden Temple",
-      "locations": [{ "name": "Golden Temple", "latitude": 31.6200, "longitude": 74.8765 }]
+      "locations": [
+        {
+          "name": "Golden Temple",
+          "latitude": 31.62,
+          "longitude": 74.8765
+        }
+      ],
+      "puzzle": "Two lands lay claim to golden halls of prayer:\nOne by a spiral path, in southern ground;\nMine is the one whose water is the heart,\nAnd at whose threshold every soul is fed.",
+      "room_number": "2"
     },
     {
       "name": "Gateway of India",
-      "locations": [{ "name": "Gateway of India", "latitude": 18.9220, "longitude": 72.8347 }]
+      "locations": [
+        {
+          "name": "Gateway of India",
+          "latitude": 18.922,
+          "longitude": 72.8347
+        }
+      ],
+      "puzzle": "No road leads up to me, but water's edge;\nA king I greeted who ne'er saw me done.\nThrough me a regiment last crossed the ledge,\nWhen foreign rule was over and the day was won.",
+      "room_number": "2"
     },
     {
       "name": "Hawa Mahal",
-      "locations": [{ "name": "Hawa Mahal", "latitude": 26.9239, "longitude": 75.8267 }]
+      "locations": [
+        {
+          "name": "Hawa Mahal",
+          "latitude": 26.9239,
+          "longitude": 75.8267
+        }
+      ],
+      "puzzle": "No rooms behind me, only face and show;\nA crown of some blue god, they say I wear.\nMy city's walls and I in matching colours glow,\nThough not the lake-palace that floats in air.",
+      "room_number": "2"
     },
     {
       "name": "Amer Fort",
-      "locations": [{ "name": "Amer Fort", "latitude": 26.9855, "longitude": 75.8513 }]
+      "locations": [
+        {
+          "name": "Amer Fort",
+          "latitude": 26.9855,
+          "longitude": 75.8513
+        }
+      ],
+      "puzzle": "Above a lake I sit, with glass to light the night;\nMy sister keeps a higher watch than I.\nYet 'twas by elephant that visitors came to sight\nMy courts, and some still ride them, passing by.",
+      "room_number": "2"
     },
     {
       "name": "Charminar",
-      "locations": [{ "name": "Charminar", "latitude": 17.3616, "longitude": 78.4747 }]
+      "locations": [
+        {
+          "name": "Charminar",
+          "latitude": 17.3616,
+          "longitude": 78.4747
+        }
+      ],
+      "puzzle": "A number and a tower make my name;\nFour there be, though some would count them more.\nA vow against a plague did give me fame,\nAnd a great mosque and a palace stand next door.",
+      "room_number": "2"
     },
     {
       "name": "Ajanta Ellora Caves",
       "locations": [
-        { "name": "Ajanta Caves", "latitude": 20.5519, "longitude": 75.7033 },
-        { "name": "Ellora Caves", "latitude": 20.0268, "longitude": 75.1790 }
-      ]
+        {
+          "name": "Ajanta Caves",
+          "latitude": 20.5519,
+          "longitude": 75.7033
+        },
+        {
+          "name": "Ellora Caves",
+          "latitude": 20.0268,
+          "longitude": 75.179
+        }
+      ],
+      "puzzle": "Not one, but two, and each a different tale:\nOne painted, hidden till a hunter's chase;\nOne carved from top to bottom, without fail,\nThree faiths in one rock's quiet, sacred space.",
+      "room_number": "3"
     },
     {
       "name": "Mysore Palace",
-      "locations": [{ "name": "Mysore Palace", "latitude": 12.3052, "longitude": 76.6552 }]
+      "locations": [
+        {
+          "name": "Mysore Palace",
+          "latitude": 12.3052,
+          "longitude": 76.6552
+        }
+      ],
+      "puzzle": "Not he of the garden-city, aping Windsor's keep,\nNor he whose lake-side halls now host the guest.\nA flame once took my wooden elder; now I leap\nIn lamplight on a festival night's crest.",
+      "room_number": "3"
     },
     {
       "name": "Victoria Memorial",
-      "locations": [{ "name": "Victoria Memorial", "latitude": 22.5448, "longitude": 88.3426 }]
+      "locations": [
+        {
+          "name": "Victoria Memorial",
+          "latitude": 22.5448,
+          "longitude": 88.3426
+        }
+      ],
+      "puzzle": "A Queen I honour, yet her name's also on a station,\nIn a city on the western shore.\nBut I am whiter, and in marble's elation\nI shelter statues, with a winged guard on top.",
+      "room_number": "3"
     },
     {
       "name": "Sun Temple (Konark)",
-      "locations": [{ "name": "Sun Temple (Konark)", "latitude": 19.8876, "longitude": 86.0945 }]
+      "locations": [
+        {
+          "name": "Sun Temple (Konark)",
+          "latitude": 19.8876,
+          "longitude": 86.0945
+        }
+      ],
+      "puzzle": "Three suns there are, in three different lands:\nOne in the west with a stepped and sacred pool,\nOne in a northern valley, in ruins, where it stands,\nMine hath wheels that tell the hour, as a rule.",
+      "room_number": "3"
     },
     {
       "name": "Hampi Ruins",
-      "locations": [{ "name": "Hampi Ruins", "latitude": 15.3350, "longitude": 76.4600 }]
+      "locations": [
+        {
+          "name": "Hampi Ruins",
+          "latitude": 15.335,
+          "longitude": 76.46
+        }
+      ],
+      "puzzle": "The name thou knowest is not the name I bore,\nNor is mine the capital's earlier tale.\nA kingdom fell, and I lie in ruin's lore,\nYet pillars sing, and boulders watch the dale.",
+      "room_number": "3"
     },
     {
       "name": "Mahabodhi Temple",
-      "locations": [{ "name": "Mahabodhi Temple", "latitude": 24.6959, "longitude": 84.9911 }]
+      "locations": [
+        {
+          "name": "Mahabodhi Temple",
+          "latitude": 24.6959,
+          "longitude": 84.9911
+        }
+      ],
+      "puzzle": "Not where he was born, nor where he preached,\nNor where he left the world, but where he woke.\nA cousin of the tree grows far, and is reached\nBy pilgrims overseas, who also make their yoke.",
+      "room_number": "4"
     },
     {
       "name": "Sanchi",
-      "locations": [{ "name": "Sanchi", "latitude": 23.4793, "longitude": 77.7397 }]
+      "locations": [
+        {
+          "name": "Sanchi",
+          "latitude": 23.4793,
+          "longitude": 77.7397
+        }
+      ],
+      "puzzle": "Lions guard mine gates, yet not the lions of thy coin;\nThey're cousins of the ones that crown the land.\nNo portrait of the Teacher doth my gates enjoin,\nBut symbols tell his tale, on every hand.",
+      "room_number": "4"
     },
     {
       "name": "Kohima War Cemetery",
-      "locations": [{ "name": "Kohima War Cemetery", "latitude": 25.6746, "longitude": 94.1086 }]
+      "locations": [
+        {
+          "name": "Kohima War Cemetery",
+          "latitude": 25.6746,
+          "longitude": 94.1086
+        }
+      ],
+      "puzzle": "A war in two places, and two silent fields:\nI'm the hillside one, where a tennis court was fought,\nMy sister lies upon a valley's shield,\nAnd both keep names of those who came and fought.",
+      "room_number": "4"
     },
     {
       "name": "Mehrangarh Fort",
-      "locations": [{ "name": "Mehrangarh Fort", "latitude": 26.2970, "longitude": 73.0180 }]
+      "locations": [
+        {
+          "name": "Mehrangarh Fort",
+          "latitude": 26.297,
+          "longitude": 73.018
+        }
+      ],
+      "puzzle": "Above a blue-washed city I preside,\nBut not the desert fort that's golden-hued.\nA poet said that giants served as guide\nTo raise me, and my walls were thus imbued.",
+      "room_number": "4"
     },
     {
       "name": "Bundi Stepwells",
-      "locations": [{ "name": "Raniji ki Baori, Bundi", "latitude": 25.4442, "longitude": 75.6381 }]
+      "locations": [
+        {
+          "name": "Raniji ki Baori, Bundi",
+          "latitude": 25.4442,
+          "longitude": 75.6381
+        }
+      ],
+      "puzzle": "Not the famed well of a northern town,\nNor the one with a hundred steps in the west:\nI am a queen's work, and I go down\nBeside my many sisters, who are blessed.",
+      "room_number": "4"
     },
     {
       "name": "Nalanda",
-      "locations": [{ "name": "Nalanda", "latitude": 25.1361, "longitude": 85.4439 }]
+      "locations": [
+        {
+          "name": "Nalanda",
+          "latitude": 25.1361,
+          "longitude": 85.4439
+        }
+      ],
+      "puzzle": "Not the first of learned seats, nor the last;\nTaxila's sister, Vikramshila's kin.\nMonks from afar walked in my halls, and passed\nLong years in study, ere the fire came in.",
+      "room_number": "5"
     }
   ]
 }
