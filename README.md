@@ -22,7 +22,9 @@ statements at a time; all five must be correct to reveal that set's unlock code.
 A team's elapsed time is saved when they start and resumes across refreshes
 and screen changes. The timer starts only after the team acknowledges the
 global instructions.
-Refreshing or revisiting the app resumes the team's saved timer. Any browser can log in as any team. Rounds unlock in order: a team must complete a round to unlock the next, and can then freely return to any unlocked round.
+Refreshing or revisiting the app resumes the team's saved timer. Any browser can log in as any team. Rounds unlock in order: completing a round reveals the entry code for the next round, and the team must enter it before that round starts. Codes are saved, so teams can return to completed rounds to look them up; previously unlocked rounds remain available.
+
+After Round 1, the app generates an entry code for Round 2. Rounds 2–5 use the code revealed by their completed challenge (the configured Hotel Detective or whitepaper code, the solved 64-digit image code, or the assigned photograph code). Each code must be entered to start the next round. Round 6 is the final round and does not issue another code.
 
 The supplied logo is displayed in the app header from `assets/inxiteout_logo.jpg`.
 

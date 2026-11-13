@@ -7,6 +7,7 @@ import math
 import os
 import random
 import re
+import secrets
 import sqlite3
 import time
 from contextlib import closing
@@ -210,6 +211,17 @@ def create_database_tables(connection: sqlite3.Connection) -> None:
             round_number INTEGER NOT NULL,
             started_at REAL NOT NULL,
             finished_at REAL,
+            PRIMARY KEY (team, round_number)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS team_round_unlock_codes (
+            team TEXT NOT NULL,
+            round_number INTEGER NOT NULL,
+            code TEXT NOT NULL,
+            entered_at REAL,
             PRIMARY KEY (team, round_number)
         )
         """
@@ -1691,6 +1703,10 @@ def reset_team_games(teams: list[str], from_round: int = 1) -> None:
                 "DELETE FROM team_round_timers WHERE team = ? AND round_number >= ?",
                 (team, from_round),
             )
+            connection.execute(
+                "DELETE FROM team_round_unlock_codes WHERE team = ? AND round_number > ?",
+                (team, from_round),
+            )
             if from_round <= 4:
                 connection.execute(
                     """
@@ -1800,7 +1816,7 @@ def start_team_round_timer(
 
 
 def finish_team_round_timer(
-    team: str, round_number: int
+    team: str, round_number: int, unlock_code: Optional[str] = None
 ) -> tuple[float, Optional[float]]:
     with closing(sqlite3.connect(ASSIGNMENT_DB_PATH, timeout=30)) as connection, connection:
         connection.execute("BEGIN IMMEDIATE")
@@ -1820,9 +1836,99 @@ def finish_team_round_timer(
             """,
             (team, round_number),
         ).fetchone()
+        if timer is not None:
+            later_rounds = [
+                number for number in ROUND_NUMBERS if number > round_number
+            ]
+            if later_rounds:
+                next_round = min(later_rounds)
+                code = (
+                    unlock_code.strip()
+                    if isinstance(unlock_code, str) and unlock_code.strip()
+                    else secrets.token_hex(3).upper()
+                )
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO team_round_unlock_codes
+                        (team, round_number, code)
+                    VALUES (?, ?, ?)
+                    """,
+                    (team, next_round, code),
+                )
     if timer is None:
         raise ValueError("The team's round timer has not been started.")
     return timer
+
+
+def get_round_unlock_code(team: str, round_number: int) -> Optional[str]:
+    if round_number not in ROUND_NUMBERS:
+        raise ValueError("Select a valid round.")
+    previous_rounds = [number for number in ROUND_NUMBERS if number < round_number]
+    if not previous_rounds:
+        return None
+
+    previous_round = max(previous_rounds)
+    with closing(sqlite3.connect(ASSIGNMENT_DB_PATH, timeout=30)) as connection, connection:
+        connection.execute("BEGIN IMMEDIATE")
+        create_database_tables(connection)
+        completed = connection.execute(
+            """
+            SELECT 1 FROM team_round_timers
+            WHERE team = ? AND round_number = ? AND finished_at IS NOT NULL
+            """,
+            (team, previous_round),
+        ).fetchone()
+        if completed is None:
+            return None
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO team_round_unlock_codes
+                (team, round_number, code)
+            VALUES (?, ?, ?)
+            """,
+            (team, round_number, secrets.token_hex(3).upper()),
+        )
+        row = connection.execute(
+            """
+            SELECT code FROM team_round_unlock_codes
+            WHERE team = ? AND round_number = ?
+            """,
+            (team, round_number),
+        ).fetchone()
+    return row[0] if row is not None else None
+
+
+def round_unlock_was_entered(team: str, round_number: int) -> bool:
+    with closing(sqlite3.connect(ASSIGNMENT_DB_PATH, timeout=30)) as connection, connection:
+        create_database_tables(connection)
+        row = connection.execute(
+            """
+            SELECT entered_at FROM team_round_unlock_codes
+            WHERE team = ? AND round_number = ?
+            """,
+            (team, round_number),
+        ).fetchone()
+    return row is not None and row[0] is not None
+
+
+def submit_round_unlock_code(team: str, round_number: int, code: str) -> bool:
+    expected_code = get_round_unlock_code(team, round_number)
+    if expected_code is None or not isinstance(code, str):
+        return False
+    if not hmac.compare_digest(
+        code.strip().encode("utf-8"), expected_code.encode("utf-8")
+    ):
+        return False
+    with closing(sqlite3.connect(ASSIGNMENT_DB_PATH, timeout=30)) as connection, connection:
+        connection.execute(
+            """
+            UPDATE team_round_unlock_codes
+            SET entered_at = COALESCE(entered_at, ?)
+            WHERE team = ? AND round_number = ? AND code = ?
+            """,
+            (time.time(), team, round_number, expected_code),
+        )
+        return connection.total_changes > 0
 
 
 def set_timer_freeze(
@@ -2811,10 +2917,13 @@ def render_whitepaper_search(st: Any, selected_round: int, rounds: list[int]) ->
         if is_correct and unlock_code:
             try:
                 finish_team_round_timer(
-                    st.session_state.selected_team, selected_round
+                    st.session_state.selected_team,
+                    selected_round,
+                    unlock_code=unlock_code,
                 )
             except (ValueError, sqlite3.Error) as error:
                 st.error(f"Could not save Round {selected_round} time: {error}")
+                return
             st.success(f"Correct! Your next code is: {unlock_code}")
             if selected_round == max(rounds):
                 try:
@@ -2874,9 +2983,12 @@ def render_hotel_detective(st: Any) -> None:
             return
         if is_correct and unlock_code:
             try:
-                finish_team_round_timer(st.session_state.selected_team, 2)
+                finish_team_round_timer(
+                    st.session_state.selected_team, 2, unlock_code=unlock_code
+                )
             except (ValueError, sqlite3.Error) as error:
                 st.error(f"Could not save Round 2 time: {error}")
+                return
             st.success(f"Correct! Enter this code to continue: {unlock_code}")
         else:
             st.error("Not quite. Review the statements and try again.")
@@ -2906,6 +3018,48 @@ def continue_after_visual_puzzle(
         st.session_state.assigned_place_index = assigned_place
         st.session_state.assignment_revision = config_revision
         st.rerun()
+
+
+def render_round_unlock_gate(st: Any, team: str, round_number: int) -> bool:
+    try:
+        code = get_round_unlock_code(team, round_number)
+        if code is None:
+            st.info("Complete the previous round to unlock this round.")
+            if st.button("Back to rounds", key=f"round_unlock_back_{round_number}"):
+                st.session_state.screen = "round"
+                st.rerun()
+            return False
+        entered = round_unlock_was_entered(team, round_number)
+    except (ValueError, sqlite3.Error) as error:
+        st.error(f"Could not load the Round {round_number} entry code: {error}")
+        return False
+
+    if entered:
+        return True
+
+    with st.form(f"round_unlock_{round_number}"):
+        submitted_code = st.text_input(
+            f"Enter the code from {round_title(round_number - 1)}",
+            max_chars=200,
+        )
+        submitted = st.form_submit_button("Unlock round", type="primary")
+    if submitted:
+        try:
+            is_correct = submit_round_unlock_code(
+                team, round_number, submitted_code
+            )
+        except (ValueError, sqlite3.Error) as error:
+            st.error(f"Could not check the Round {round_number} entry code: {error}")
+            return False
+        if is_correct:
+            st.success(f"{round_title(round_number)} unlocked.")
+            st.rerun()
+        st.error("That code is not correct. Check the code from the previous round.")
+
+    if st.button("Back to rounds", key=f"round_unlock_back_{round_number}"):
+        st.session_state.screen = "round"
+        st.rerun()
+    return False
 
 
 def render_visual_puzzle(
@@ -2995,7 +3149,7 @@ def render_visual_puzzle(
             return
         if is_correct:
             try:
-                finish_team_round_timer(team, 4)
+                finish_team_round_timer(team, 4, unlock_code=final_code)
             except (ValueError, sqlite3.Error) as error:
                 st.error(f"Could not save Round 4 time: {error}")
                 return
@@ -3026,10 +3180,10 @@ def render_hidden_photograph(st: Any, team: str) -> None:
     st.image(state["reference_image"], use_container_width=True)
     if state["code"] is not None:
         try:
-            finish_team_round_timer(team, 5)
+            finish_team_round_timer(team, 5, unlock_code=state["code"])
         except (ValueError, sqlite3.Error) as error:
             st.error(f"Could not save Round 5 time: {error}")
-        st.success(f"Your next code: {state['code']}")
+            return
 
     if state["reviewed"]:
         if state["is_correct"]:
@@ -3793,6 +3947,14 @@ def main() -> None:
     if st.session_state.screen in ("instructions", "timer", "round", "lookup"):
         render_team_timer(st, st.session_state.selected_team)
     if st.session_state.screen == "lookup":
+        st.caption(round_title(st.session_state.selected_round))
+        if st.session_state.selected_round > min(ROUND_NUMBERS):
+            if not render_round_unlock_gate(
+                st,
+                st.session_state.selected_team,
+                st.session_state.selected_round,
+            ):
+                return
         try:
             start_team_round_timer(
                 st.session_state.selected_team, st.session_state.selected_round
@@ -3935,7 +4097,23 @@ def main() -> None:
             st.rerun()
         return
 
-    st.caption(round_title(st.session_state.selected_round))
+    selected_round = st.session_state.selected_round
+    next_rounds = [
+        number for number in ROUND_NUMBERS if number > selected_round
+    ]
+    if next_rounds:
+        try:
+            next_code = get_round_unlock_code(
+                st.session_state.selected_team, min(next_rounds)
+            )
+        except (ValueError, sqlite3.Error) as error:
+            st.error(f"Could not load the next round's entry code: {error}")
+            return
+        if next_code is not None:
+            st.success(
+                f"Code to enter in {round_title(min(next_rounds))}: {next_code}"
+            )
+
     if st.session_state.selected_round == 2:
         if st.button("Back to rounds"):
             st.session_state.screen = "round"
@@ -4037,6 +4215,25 @@ def main() -> None:
                         f"Could not save Round {st.session_state.selected_round} time: "
                         f"{error}"
                     )
+                    return
+                next_rounds = [
+                    number
+                    for number in ROUND_NUMBERS
+                    if number > st.session_state.selected_round
+                ]
+                if next_rounds:
+                    try:
+                        unlock_code = get_round_unlock_code(
+                            st.session_state.selected_team, min(next_rounds)
+                        )
+                    except (ValueError, sqlite3.Error) as error:
+                        st.error(f"Could not load the next round's code: {error}")
+                        return
+                    if unlock_code is not None:
+                        st.success(
+                            "Code to enter in "
+                            f"{round_title(min(next_rounds))}: {unlock_code}"
+                        )
                 if st.session_state.selected_round == max(ROUND_NUMBERS):
                     try:
                         finish_team_timer(st.session_state.selected_team)

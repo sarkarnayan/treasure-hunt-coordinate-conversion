@@ -29,6 +29,8 @@ from app import (
     load_visual_puzzle_content,
     get_team_timer,
     get_unlocked_rounds,
+    get_round_unlock_code,
+    round_unlock_was_entered,
     haversine_km,
     load_config,
     format_elapsed_time,
@@ -43,6 +45,7 @@ from app import (
     start_team_timer,
     start_team_round_timer,
     finish_team_round_timer,
+    submit_round_unlock_code,
     submit_visual_puzzle_answer,
     submit_visual_puzzle_final_code,
     submit_hidden_photograph,
@@ -52,6 +55,7 @@ from app import (
     team_names_for_count,
     verify_admin_credentials,
     review_hidden_photograph_submission,
+    reset_team_games,
 )
 from murder_mysteries import MURDER_MYSTERIES
 from sudoku_puzzles import DEFAULT_SUDOKU_PUZZLES
@@ -259,6 +263,36 @@ class CoordinateLookupTests(unittest.TestCase):
                     start_team_round_timer("Team 1", number)
                     finish_team_round_timer("Team 1", number)
                 self.assertEqual(get_unlocked_rounds("Team 1", rounds), rounds)
+
+    def test_round_entry_requires_previous_round_code(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("app.ASSIGNMENT_DB_PATH", Path(directory) / "round-codes.sqlite3"):
+                start_team_round_timer("Team 1", 1)
+                finish_team_round_timer("Team 1", 1)
+                code = get_round_unlock_code("Team 1", 2)
+
+                self.assertIsNotNone(code)
+                if code is None:
+                    self.fail("Round 1 should issue a Round 2 entry code.")
+                self.assertEqual(get_round_unlock_code("Team 1", 2), code)
+                self.assertFalse(round_unlock_was_entered("Team 1", 2))
+                self.assertFalse(submit_round_unlock_code("Team 1", 2, "wrong"))
+                self.assertFalse(round_unlock_was_entered("Team 1", 2))
+                self.assertTrue(submit_round_unlock_code("Team 1", 2, code))
+                self.assertTrue(round_unlock_was_entered("Team 1", 2))
+
+    def test_completed_round_code_is_used_for_next_round_and_reset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("app.ASSIGNMENT_DB_PATH", Path(directory) / "round-codes.sqlite3"):
+                start_team_round_timer("Team 1", 2)
+                finish_team_round_timer("Team 1", 2, unlock_code="CODE-3")
+
+                self.assertEqual(get_round_unlock_code("Team 1", 3), "CODE-3")
+                reset_team_games(["Team 1"], from_round=2)
+                start_team_round_timer("Team 1", 2)
+                finish_team_round_timer("Team 1", 2)
+                self.assertNotEqual(get_round_unlock_code("Team 1", 3), "CODE-3")
+
     def test_team_round_timer_persists_and_finishes_only_once(self):
         with tempfile.TemporaryDirectory() as directory:
             with patch("app.ASSIGNMENT_DB_PATH", Path(directory) / "round-timers.sqlite3"):
@@ -971,6 +1005,48 @@ class CoordinateLookupTests(unittest.TestCase):
                 app.button[0].click().run()
 
                 self.assertFalse(app.exception)
+                self.assertTrue(
+                    any(button.label == "Unlock round" for button in app.button)
+                )
+                self.assertFalse(
+                    any("Hotel Detective" in heading.value for heading in app.subheader)
+                )
+                connection = sqlite3.connect(Path(directory) / "game.sqlite3")
+                try:
+                    round_two_timer = connection.execute(
+                        """
+                        SELECT 1 FROM team_round_timers
+                        WHERE team = ? AND round_number = ?
+                        """,
+                        ("Team 1", 2),
+                    ).fetchone()
+                finally:
+                    connection.close()
+                self.assertIsNone(round_two_timer)
+                round_two_code = get_round_unlock_code("Team 1", 2)
+                self.assertIsNotNone(round_two_code)
+                if round_two_code is None:
+                    self.fail("Round 1 should issue a Round 2 entry code.")
+                app.text_input[0].set_value(round_two_code)
+                next(
+                    button
+                    for button in app.button
+                    if button.label == "Unlock round"
+                ).click().run()
+
+                self.assertFalse(app.exception)
+                connection = sqlite3.connect(Path(directory) / "game.sqlite3")
+                try:
+                    round_two_timer = connection.execute(
+                        """
+                        SELECT 1 FROM team_round_timers
+                        WHERE team = ? AND round_number = ?
+                        """,
+                        ("Team 1", 2),
+                    ).fetchone()
+                finally:
+                    connection.close()
+                self.assertIsNotNone(round_two_timer)
                 self.assertTrue(
                     any("Hotel Detective" in heading.value for heading in app.subheader)
                 )
