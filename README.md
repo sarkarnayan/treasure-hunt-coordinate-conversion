@@ -98,11 +98,12 @@ assigned a random complete set and cannot choose one. Statements and codes are
 stored in `assignments.sqlite3` and are blank until configured. Only a complete
 set with an unlock code can be played. For Round 3, configure four sets of four IXO
 whitepaper questions, their correct answers, and one unlock code per set.
-Players choose a set and must answer all four questions correctly to reveal
-that set's code. Answers are checked without regard to capitalization or
-repeated whitespace. Round content is stored in `assignments.sqlite3`. Saving
-valid game configuration changes resets round assignments so teams receive
-clues matching the updated configuration.
+Each team is randomly assigned a set and must answer all four questions
+correctly to reveal that set's code. The assignment persists across refreshes.
+Answers are checked without regard to capitalization or repeated whitespace.
+Round content is stored in `assignments.sqlite3`. Saving valid game
+configuration changes resets round assignments so teams receive clues matching
+the updated configuration.
 For Round 1, edit place names, puzzles, room numbers, and the Round 2 entry
 code participants will find at each location in **Round 1: The Landmark Riddle
 - Places and puzzles**. Configure a code for every place before play; codes are

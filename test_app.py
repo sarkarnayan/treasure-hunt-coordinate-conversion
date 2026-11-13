@@ -21,6 +21,7 @@ from app import (
     find_nearest_place,
     get_or_assign_place,
     get_or_assign_hotel_detective_set,
+    get_or_assign_whitepaper_set,
     get_admin_team_timing,
     get_hidden_photograph_state,
     get_murder_mystery_state,
@@ -611,7 +612,7 @@ class CoordinateLookupTests(unittest.TestCase):
             render_visual_puzzle(streamlit, "Team 1", [1, 2, 3, 4], 0)
 
         image_factory.assert_called_once_with(f"Code segment: {solved_segment}")
-        streamlit.image.assert_any_call(segment_image, use_container_width=True)
+        streamlit.image.assert_any_call(segment_image, width="stretch")
         streamlit.success.assert_called_once_with("Puzzle 1 solved.")
 
     def test_visual_puzzle_uses_configured_free_attempts_and_penalty(self):
@@ -1588,7 +1589,24 @@ class CoordinateLookupTests(unittest.TestCase):
                         1, ["Answer 1", "Answer 2", "Answer 3", "Answer 4"]
                     )
 
-    def test_round_three_displays_four_questions_for_selected_set(self):
+    def test_whitepaper_question_set_is_assigned_and_persisted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("app.ASSIGNMENT_DB_PATH", Path(directory) / "whitepaper.sqlite3"):
+                with patch("app.random.choice", return_value=3) as choose_set:
+                    self.assertEqual(
+                        get_or_assign_whitepaper_set("Team 1", [1, 2, 3, 4]),
+                        3,
+                    )
+                    choose_set.assert_called_once_with([1, 2, 3, 4])
+
+                with patch("app.random.choice") as choose_set:
+                    self.assertEqual(
+                        get_or_assign_whitepaper_set("Team 1", [1, 2, 3, 4]),
+                        3,
+                    )
+                    choose_set.assert_not_called()
+
+    def test_round_three_displays_assigned_set_without_a_selector(self):
         with tempfile.TemporaryDirectory() as directory:
             with patch("app.ASSIGNMENT_DB_PATH", Path(directory) / "whitepaper.sqlite3"):
                 save_whitepaper_content(
@@ -1605,29 +1623,30 @@ class CoordinateLookupTests(unittest.TestCase):
                     """
 import streamlit as st
 from app import render_whitepaper_search
-render_whitepaper_search(st, 3, [1, 2, 3, 4, 5, 6])
+render_whitepaper_search(st, "Team 1", 3, [1, 2, 3, 4, 5, 6])
 """
                 )
-                app.run()
+                with patch("app.random.choice", return_value=2):
+                    app.run()
 
-                self.assertFalse(app.exception)
-                self.assertEqual(len(app.text_input), 4)
-                self.assertTrue(
-                    all(
-                        any(f"Whitepaper question {position}" in item.value for item in app.markdown)
-                        for position in range(1, 5)
+                    self.assertFalse(app.exception)
+                    self.assertEqual(len(app.text_input), 4)
+                    self.assertEqual(len(app.selectbox), 0)
+                    self.assertTrue(
+                        any(
+                            item.value == "Assigned question set: Set 2"
+                            for item in app.caption
+                        )
                     )
-                )
-                app.selectbox[0].set_value(2).run()
-
-                self.assertFalse(app.exception)
-                self.assertEqual(len(app.text_input), 4)
-                self.assertTrue(
-                    all(
-                        any(f"Whitepaper question {position}" in item.value for item in app.markdown)
-                        for position in range(5, 9)
+                    self.assertTrue(
+                        all(
+                            any(
+                                f"Whitepaper question {position}" in item.value
+                                for item in app.markdown
+                            )
+                            for position in range(5, 9)
+                        )
                     )
-                )
 
     def test_whitepaper_legacy_codes_migrate_to_four_question_sets(self):
         with tempfile.TemporaryDirectory() as directory:

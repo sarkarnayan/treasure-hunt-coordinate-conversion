@@ -328,6 +328,14 @@ def create_database_tables(connection: sqlite3.Connection) -> None:
     )
     connection.execute(
         """
+        CREATE TABLE IF NOT EXISTS whitepaper_assignments (
+            team TEXT PRIMARY KEY,
+            set_number INTEGER NOT NULL CHECK (set_number BETWEEN 1 AND 4)
+        )
+        """
+    )
+    connection.execute(
+        """
         CREATE TABLE IF NOT EXISTS visual_puzzles (
             position INTEGER PRIMARY KEY,
             image BLOB NOT NULL,
@@ -740,6 +748,41 @@ def load_whitepaper_content() -> tuple[list[dict[str, str]], list[str]]:
         ):
             codes[set_number - 1] = code
     return questions, codes
+
+
+def get_or_assign_whitepaper_set(team: str, available_sets: list[int]) -> int:
+    if not team.strip() or not available_sets or any(
+        isinstance(set_number, bool)
+        or not isinstance(set_number, int)
+        or set_number not in range(1, 5)
+        for set_number in available_sets
+    ):
+        raise ValueError("A team and at least one valid whitepaper set are required.")
+
+    available_sets = list(dict.fromkeys(available_sets))
+    with (
+        closing(sqlite3.connect(ASSIGNMENT_DB_PATH, timeout=30)) as connection,
+        connection,
+    ):
+        connection.execute("BEGIN IMMEDIATE")
+        create_database_tables(connection)
+        assignment = connection.execute(
+            "SELECT set_number FROM whitepaper_assignments WHERE team = ?",
+            (team,),
+        ).fetchone()
+        if assignment is not None and assignment[0] in available_sets:
+            return assignment[0]
+
+        set_number = random.choice(available_sets)
+        connection.execute(
+            """
+            INSERT INTO whitepaper_assignments (team, set_number)
+            VALUES (?, ?)
+            ON CONFLICT(team) DO UPDATE SET set_number = excluded.set_number
+            """,
+            (team, set_number),
+        )
+        return set_number
 
 
 def save_whitepaper_content(
@@ -2662,6 +2705,7 @@ def clear_assignments() -> None:
         connection.execute("BEGIN IMMEDIATE")
         create_database_tables(connection)
         connection.execute("DELETE FROM assignments")
+        connection.execute("DELETE FROM whitepaper_assignments")
         connection.execute("DELETE FROM murder_mystery_progress")
         connection.execute("DELETE FROM murder_mystery_assignments")
 
@@ -3192,10 +3236,10 @@ def render_hidden_photograph_reviews(st: Any, config: dict[str, Any]) -> None:
         reference_column, submission_column = st.columns(2)
         with reference_column:
             st.caption("Admin reference")
-            st.image(submission["reference_image"], use_container_width=True)
+            st.image(submission["reference_image"], width="stretch")
         with submission_column:
             st.caption("Team submission")
-            st.image(submission["submission_image"], use_container_width=True)
+            st.image(submission["submission_image"], width="stretch")
         if submission["reviewed_at"] is not None:
             if submission["is_correct"]:
                 st.success("Reviewed: correct photo.")
@@ -3239,10 +3283,12 @@ def render_hidden_photograph_reviews(st: Any, config: dict[str, Any]) -> None:
             st.rerun()
 
 
-def render_whitepaper_search(st: Any, selected_round: int, rounds: list[int]) -> None:
+def render_whitepaper_search(
+    st: Any, team: str, selected_round: int, rounds: list[int]
+) -> None:
     st.subheader(round_title(3))
     st.caption(
-        "Choose a set and answer all four questions. These questions are from "
+        "Answer all four questions in your assigned set. These questions are from "
         "IXO whitepapers."
     )
     try:
@@ -3262,11 +3308,12 @@ def render_whitepaper_search(st: Any, selected_round: int, rounds: list[int]) ->
             "four question sets and their unlock codes."
         )
         return
-    set_number = st.selectbox(
-        "Question set",
-        range(1, 5),
-        format_func=lambda value: f"Set {value}",
-    )
+    try:
+        set_number = get_or_assign_whitepaper_set(team, list(range(1, 5)))
+    except (ValueError, sqlite3.Error) as error:
+        st.error(f"Could not assign a whitepaper question set: {error}")
+        return
+    st.caption(f"Assigned question set: Set {set_number}")
     first_index = (set_number - 1) * 4
     selected_questions = questions[first_index : first_index + 4]
     with st.form(f"whitepaper_question_set_{set_number}"):
@@ -3295,7 +3342,7 @@ def render_whitepaper_search(st: Any, selected_round: int, rounds: list[int]) ->
         if is_correct and unlock_code:
             try:
                 finish_team_round_timer(
-                    st.session_state.selected_team,
+                    team,
                     selected_round,
                     unlock_code=unlock_code,
                 )
@@ -3520,7 +3567,7 @@ def render_visual_puzzle(
             create_riddle_image(
                 f"Code segment: {assigned_puzzles[position - 1]['Code segment']}"
             ),
-            use_container_width=True,
+            width="stretch",
         )
 
     if current_position <= VISUAL_PUZZLE_COUNT:
@@ -3531,7 +3578,7 @@ def render_visual_puzzle(
         )
         st.image(
             assigned_puzzles[current_position - 1]["Image"],
-            use_container_width=True,
+            width="stretch",
         )
         with st.form(f"visual_puzzle_answer_{current_position}"):
             answer = st.text_input("Name what you see")
@@ -3600,7 +3647,7 @@ def render_hidden_photograph(st: Any, team: str) -> None:
         "Find this place, then take or upload a photo with every team member "
         "standing with the matching object."
     )
-    st.image(state["reference_image"], use_container_width=True)
+    st.image(state["reference_image"], width="stretch")
     if state["code"] is not None:
         try:
             round_already_completed = get_round_unlock_code(team, 6) is not None
@@ -3701,7 +3748,7 @@ def render_murder_mystery(
                 ],
             ]
         )
-        st.image(create_riddle_image(mystery_text), use_container_width=True)
+        st.image(create_riddle_image(mystery_text), width="stretch")
 
         if state["mystery_solved"]:
             st.success("Murder mystery solved.")
@@ -3973,7 +4020,7 @@ def render_admin(st: Any, config: dict[str, Any]) -> None:
                 else format_elapsed_time(adjusted)
             )
             rows.append(row)
-        st.dataframe(rows, hide_index=True, use_container_width=True)
+        st.dataframe(rows, hide_index=True, width="stretch")
 
     def save_admin_configuration(
         updated_config: dict[str, Any], widget_keys: tuple[str, ...]
@@ -4654,7 +4701,10 @@ def main() -> None:
             st.session_state.screen = "round"
             st.rerun()
         render_whitepaper_search(
-            st, st.session_state.selected_round, ROUND_NUMBERS
+            st,
+            st.session_state.selected_team,
+            st.session_state.selected_round,
+            ROUND_NUMBERS,
         )
         return
 
@@ -4693,7 +4743,7 @@ def main() -> None:
         create_riddle_image(
             config["places"][st.session_state.assigned_place_index]["puzzle"]
         ),
-        use_container_width=True,
+        width="stretch",
     )
     if st.button("Back to rounds"):
         st.session_state.screen = "round"
