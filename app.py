@@ -2318,6 +2318,38 @@ def get_active_timer_freezes() -> tuple[bool, set[tuple[str, int]]]:
     )
 
 
+def get_admin_set_assignments(teams: list[str]) -> list[dict[str, str]]:
+    with closing(sqlite3.connect(ASSIGNMENT_DB_PATH, timeout=30)) as connection, connection:
+        create_database_tables(connection)
+        hotel_assignments = dict(
+            connection.execute(
+                "SELECT team, set_number FROM hotel_detective_assignments"
+            )
+        )
+        whitepaper_assignments = dict(
+            connection.execute(
+                "SELECT team, set_number FROM whitepaper_assignments"
+            )
+        )
+
+    return [
+        {
+            "Team": team,
+            "Round 2: Statement set": (
+                f"Set {hotel_assignments[team]}"
+                if team in hotel_assignments
+                else "Not assigned"
+            ),
+            "Round 3: Question set": (
+                f"Set {whitepaper_assignments[team]}"
+                if team in whitepaper_assignments
+                else "Not assigned"
+            ),
+        }
+        for team in teams
+    ]
+
+
 def elapsed_without_freezes(
     started_at: float, ended_at: float, freezes: list[tuple[float, float]]
 ) -> float:
@@ -3313,7 +3345,6 @@ def render_whitepaper_search(
     except (ValueError, sqlite3.Error) as error:
         st.error(f"Could not assign a whitepaper question set: {error}")
         return
-    st.caption(f"Assigned question set: Set {set_number}")
     first_index = (set_number - 1) * 4
     selected_questions = questions[first_index : first_index + 4]
     with st.form(f"whitepaper_question_set_{set_number}"):
@@ -3391,7 +3422,6 @@ def render_hotel_detective(st: Any, team: str, config: dict[str, Any]) -> None:
         st.error(f"Could not load Hotel Detective content or progress: {error}")
         return
 
-    st.caption(f"Assigned statement set: Set {set_number}")
     st.caption(
         f"Wrong attempts on this set: {progress['wrong_attempts']} "
         f"(first {penalty_settings['free_attempts']} are free). "
@@ -4047,6 +4077,13 @@ def render_admin(st: Any, config: dict[str, Any]) -> None:
             "successful completion, and adjusted totals include penalties."
         )
         render_team_timing_overview()
+        st.subheader("Puzzle set assignments")
+        try:
+            assignment_rows = get_admin_set_assignments(config["teams"])
+        except sqlite3.Error as error:
+            st.error(f"Could not load puzzle set assignments: {error}")
+        else:
+            st.dataframe(assignment_rows, hide_index=True, width="stretch")
         st.subheader("Reset game progress and time")
         st.warning(
             "A reset permanently clears progress and penalties in the selected scope. "

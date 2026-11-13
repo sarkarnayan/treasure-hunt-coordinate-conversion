@@ -22,6 +22,7 @@ from app import (
     get_or_assign_place,
     get_or_assign_hotel_detective_set,
     get_or_assign_whitepaper_set,
+    get_admin_set_assignments,
     get_admin_team_timing,
     get_hidden_photograph_state,
     get_murder_mystery_state,
@@ -34,6 +35,7 @@ from app import (
     load_murder_mystery_content,
     load_whitepaper_content,
     render_whitepaper_search,
+    render_admin,
     render_visual_puzzle,
     load_visual_puzzle_content,
     get_team_timer,
@@ -1290,6 +1292,59 @@ class CoordinateLookupTests(unittest.TestCase):
         self.assertEqual(second_team_assignment, 1)
         self.assertEqual(choose_set.call_count, 2)
 
+    def test_admin_dashboard_shows_round_two_and_three_set_assignments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                patch("app.ASSIGNMENT_DB_PATH", Path(directory) / "admin.sqlite3"),
+                patch("app.random.choice", side_effect=[2, 1]),
+                patch.dict(
+                    os.environ,
+                    {
+                        "TREASURE_HUNT_ADMIN_USER": "admin",
+                        "TREASURE_HUNT_ADMIN_PASSWORD": "secret",
+                    },
+                ),
+            ):
+                get_or_assign_hotel_detective_set("Team 1", [1, 2, 3, 4])
+                get_or_assign_whitepaper_set("Team 1", [1, 2, 3, 4])
+
+                app = AppTest.from_string(
+                    """
+import streamlit as st
+from app import load_config, render_admin
+config = load_config()
+config["teams"] = ["Team 1", "Team 2"]
+render_admin(st, config)
+""",
+                    default_timeout=15,
+                )
+                app.session_state.admin_authenticated = True
+                app.run()
+
+                self.assertFalse(app.exception)
+                self.assertTrue(
+                    any(
+                        heading.value == "Puzzle set assignments"
+                        for heading in app.subheader
+                    )
+                )
+                assignment_table = app.dataframe[1].value.to_dict(orient="records")
+                self.assertEqual(
+                    assignment_table,
+                    [
+                        {
+                            "Team": "Team 1",
+                            "Round 2: Statement set": "Set 2",
+                            "Round 3: Question set": "Set 1",
+                        },
+                        {
+                            "Team": "Team 2",
+                            "Round 2: Statement set": "Not assigned",
+                            "Round 3: Question set": "Not assigned",
+                        },
+                    ],
+                )
+
     def test_round_two_shows_hotel_statements_after_round_one(self):
         with tempfile.TemporaryDirectory() as directory:
             config = load_config()
@@ -1389,9 +1444,9 @@ class CoordinateLookupTests(unittest.TestCase):
                 self.assertFalse(
                     any(widget.label == "Statement set" for widget in app.selectbox)
                 )
-                self.assertTrue(
+                self.assertFalse(
                     any(
-                        "Assigned statement set: Set 1" in caption.value
+                        "Assigned statement set:" in caption.value
                         for caption in app.caption
                     )
                 )
@@ -1632,9 +1687,9 @@ render_whitepaper_search(st, "Team 1", 3, [1, 2, 3, 4, 5, 6])
                     self.assertFalse(app.exception)
                     self.assertEqual(len(app.text_input), 4)
                     self.assertEqual(len(app.selectbox), 0)
-                    self.assertTrue(
+                    self.assertFalse(
                         any(
-                            item.value == "Assigned question set: Set 2"
+                            "Assigned question set:" in item.value
                             for item in app.caption
                         )
                     )
