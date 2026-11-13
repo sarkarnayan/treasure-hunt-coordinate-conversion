@@ -18,13 +18,16 @@ Each team receives a random riddle rendered as an image. Assignments are saved
 locally and unique per round, so two teams do not receive the same place in one
 coordinate round. Coordinates are matched locally to the assigned landmark and
 return its configured room number. Hotel Detective presents five True/False
-statements at a time; all five must be correct to reveal that set's unlock code.
+statements from a randomly assigned complete set to each team; all five must be
+correct to reveal that set's unlock code. Set assignments are saved per team.
 A team's elapsed time is saved when they start and resumes across refreshes
 and screen changes. The timer starts only after the team acknowledges the
 global instructions.
-Refreshing or revisiting the app resumes the team's saved timer. Any browser can log in as any team. Rounds unlock in order: completing a round reveals the entry code for the next round, and the team must enter it before that round starts. Codes are saved, so teams can return to completed rounds to look them up; previously unlocked rounds remain available.
+Refreshing or revisiting the app resumes the team's saved timer. Any browser can log in as any team. Rounds unlock in order: the team must enter the required code before the next round starts. Round 1 codes are retrieved at the physical location and are never shown in the app; codes from later rounds remain available when revisiting a completed round. Previously unlocked rounds remain available.
+After completing a round, a button takes the team directly to the next round's
+code-entry screen.
 
-After Round 1, the app generates an entry code for Round 2. Rounds 2–5 use the code revealed by their completed challenge (the configured Hotel Detective or whitepaper code, the solved 64-digit image code, or the assigned photograph code). Each code must be entered to start the next round. Round 6 is the final round and does not issue another code.
+For each Round 1 puzzle, admins configure the code participants will find at its location. After solving the coordinate puzzle, participants see only the room number; they retrieve the code there and enter it to start Round 2. Rounds 2–5 use the code revealed by their completed challenge (the configured Hotel Detective or whitepaper code, the solved 64-digit image code, or the assigned photograph code). Round 6 is the final round and does not issue another code.
 
 The supplied logo is displayed in the app header from `assets/inxiteout_logo.jpg`.
 
@@ -40,8 +43,8 @@ Game configuration is managed in the **Admin** section and stored in
 count in **Game settings**, and edit team names in **Teams**. All six rounds are
 always available; `match_radius_km` controls coordinate matching. The team
 count is limited to 15 so each team can receive a unique Round 6 mystery. Each
-Round 1 place has its own puzzle, coordinate
-reference point(s), and room number. Place assignments are stored separately
+Round 1 place has its own puzzle, coordinate reference point(s), room number,
+and admin-configured Round 2 entry code. Place assignments are stored separately
 in `assignments.sqlite3`.
 
 ## Admin
@@ -54,6 +57,11 @@ team progress and a **Team times** table with each configured team's elapsed
 time, per-round durations, penalties, and adjusted total. Round time starts on
 first entry and runs until the team completes that round, including time spent
 away, except during admin freezes. In **Dashboard → Team times**, select a
+
+For local testing, set `environment = "LOCAL"` in the workspace `.env` file.
+After an admin signs in and switches to **Game**, the round selector includes
+all rounds and the entry-code gate is bypassed for that admin session.
+Participants still follow normal round progression and code requirements. In **Dashboard → Team times**, select a
 team and round and use **Freeze selected round** to pause that round and the
 team's overall timer while the round is active. A round can be frozen before
 it starts; its freeze stops affecting the team total when the round finishes.
@@ -74,28 +82,34 @@ coordinates, the editable round content, and Round 5 photo-submission reviews.
 Admin forms manage settings and content without editing raw JSON. Teams select
 their default names in the game screen and tell an admin their preferred names;
 admins can replace the names in the **Teams** section. Unchanged teams keep
-their default names. **Game settings** also controls Round 4's free wrong answers per image
-and penalty per later wrong answer, Round 5's penalty for an incorrect photo
-review, and Round 6's free wrong answers per puzzle and penalty per later wrong
-answer. Penalties are configured in seconds; zero disables them. Round 5 has no
-free-attempt setting because its penalty is applied when an admin reviews a
-photo. Enter the 20 statements in order; each
-consecutive five statements form a set. Select the correct True/False answer
-for each statement, and enter one unlock code per set. Statements and codes are
-stored in `assignments.sqlite3` and are blank until configured. Only a complete set with
-an unlock code can be played. For Round 3, enter up to 20 whitepaper questions,
-their correct answers, and one unlock code per question. Players can select a
-configured question; the app identifies the questions as being from IXO
-whitepapers and reveals that question's code only for a correct answer. Answers
-are checked without regard to capitalization or repeated whitespace. Round
-content is stored in `assignments.sqlite3`. Saving valid game configuration
-changes resets round assignments so teams receive clues matching the updated
-configuration.
-For Round 1, edit place names, puzzles, and room numbers in **Round 1: The
-Landmark Riddle - Places and puzzles**. Edit each reference point's name and
-latitude/longitude in **Round 1: The Landmark Riddle - Coordinate references**.
-Each correct coordinate entry reveals the room configured for that assigned
-place. The 20 place rows remain fixed.
+their default names. **Game settings** also controls Round 2's free wrong
+answers per statement set and penalty per later wrong answer, Round 4's free
+wrong answers per image and penalty per later wrong answer, Round 5's penalty
+for an incorrect photo review, and Round 6's free wrong answers per puzzle and
+penalty per later wrong answer. The same section lets admins edit the global
+Do's and Don'ts shown to teams; enter one item per line. Rounds 2, 4, and 6
+count attempts separately for each set, image, or puzzle. Penalties are
+configured in seconds; zero disables them. Round 5 has no free-attempt setting
+because its penalty is applied when an admin reviews a photo. Enter the 20
+statements in order; each consecutive five statements form a set. Select the
+correct True/False answer
+for each statement, and enter one unlock code per set. Teams are automatically
+assigned a random complete set and cannot choose one. Statements and codes are
+stored in `assignments.sqlite3` and are blank until configured. Only a complete
+set with an unlock code can be played. For Round 3, configure four sets of four IXO
+whitepaper questions, their correct answers, and one unlock code per set.
+Players choose a set and must answer all four questions correctly to reveal
+that set's code. Answers are checked without regard to capitalization or
+repeated whitespace. Round content is stored in `assignments.sqlite3`. Saving
+valid game configuration changes resets round assignments so teams receive
+clues matching the updated configuration.
+For Round 1, edit place names, puzzles, room numbers, and the Round 2 entry
+code participants will find at each location in **Round 1: The Landmark Riddle
+- Places and puzzles**. Configure a code for every place before play; codes are
+never shown to participants in the app. A correct coordinate entry shows only
+the room configured for that assigned place. Edit each reference point's name
+and latitude/longitude in **Round 1: The Landmark Riddle - Coordinate
+references**. The 20 place rows remain fixed.
 
 For Round 4, upload a pool of 4–50 JPEG, PNG, or WebP images (up to 5 MB each),
 with a correct answer and a 16-digit code segment for each image. Images can

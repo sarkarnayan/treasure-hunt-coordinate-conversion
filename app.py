@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from PIL import Image, ImageDraw, ImageFont
+from dotenv import load_dotenv
 
 from murder_mysteries import MURDER_MYSTERIES
 from riddles import RIDDLES
@@ -24,6 +25,7 @@ from sudoku_puzzles import DEFAULT_SUDOKU_PUZZLES
 CONFIG_PATH = Path(__file__).with_name("places.json")
 ASSIGNMENT_DB_PATH = Path(__file__).with_name("assignments.sqlite3")
 LOGO_PATH = Path(__file__).with_name("assets") / "inxiteout_logo.jpg"
+load_dotenv(dotenv_path=Path(__file__).with_name(".env"), override=False)
 VISUAL_PUZZLE_COUNT = 4
 VISUAL_PUZZLE_MAX_POOL_SIZE = 50
 VISUAL_PUZZLE_SEGMENT_LENGTH = 16
@@ -33,10 +35,16 @@ VISUAL_PUZZLE_MAX_IMAGE_BYTES = 5 * 1024 * 1024
 VISUAL_PUZZLE_MAX_IMAGE_PIXELS = 20_000_000
 HIDDEN_PHOTOGRAPH_MIN_COUNT = 15
 HIDDEN_PHOTOGRAPH_PENALTY_SECONDS = 120
+HOTEL_DETECTIVE_FREE_ATTEMPTS = 3
+HOTEL_DETECTIVE_PENALTY_SECONDS = 120
 MURDER_MYSTERY_CASE_COUNT = 15
 MURDER_MYSTERY_FREE_ATTEMPTS = 3
 MURDER_MYSTERY_PENALTY_SECONDS = 120
 ROUND_PENALTY_DEFAULTS = {
+    "2": {
+        "free_attempts": HOTEL_DETECTIVE_FREE_ATTEMPTS,
+        "penalty_seconds": HOTEL_DETECTIVE_PENALTY_SECONDS,
+    },
     "4": {
         "free_attempts": VISUAL_PUZZLE_FREE_ATTEMPTS,
         "penalty_seconds": VISUAL_PUZZLE_PENALTY_SECONDS,
@@ -46,6 +54,17 @@ ROUND_PENALTY_DEFAULTS = {
         "free_attempts": MURDER_MYSTERY_FREE_ATTEMPTS,
         "penalty_seconds": MURDER_MYSTERY_PENALTY_SECONDS,
     },
+}
+GAME_INSTRUCTION_DEFAULTS = {
+    "dos": [
+        "Keep your team together and follow organizer directions.",
+        "Share your team's ideas with one another and submit answers through the app.",
+        "Keep track of clues and unlock codes your team earns.",
+    ],
+    "donts": [
+        "Share clues, answers, or unlock codes with other teams.",
+        "Interfere with another team's work or try to bypass or alter the game.",
+    ],
 }
 SUDOKU_SIZE = 4
 SUDOKU_BOX_SIZE = 2
@@ -64,6 +83,13 @@ ROUND_NUMBERS = list(ROUND_TITLES)
 def round_title(round_number: int) -> str:
     title = ROUND_TITLES.get(round_number)
     return f"Round {round_number}: {title}" if title else f"Round {round_number}"
+
+
+def admin_round_access_enabled(admin_authenticated: bool) -> bool:
+    return (
+        bool(admin_authenticated)
+        and os.environ.get("environment", "").strip().casefold() == "local"
+    )
 
 
 def validate_coordinates(latitude: float, longitude: float) -> None:
@@ -265,10 +291,37 @@ def create_database_tables(connection: sqlite3.Connection) -> None:
     )
     connection.execute(
         """
+        CREATE TABLE IF NOT EXISTS hotel_detective_assignments (
+            team TEXT PRIMARY KEY,
+            set_number INTEGER NOT NULL CHECK (set_number BETWEEN 1 AND 4)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS hotel_detective_progress (
+            team TEXT NOT NULL,
+            set_number INTEGER NOT NULL,
+            wrong_attempts INTEGER NOT NULL DEFAULT 0,
+            penalty_seconds INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (team, set_number)
+        )
+        """
+    )
+    connection.execute(
+        """
         CREATE TABLE IF NOT EXISTS whitepaper_questions (
             position INTEGER PRIMARY KEY,
             question TEXT NOT NULL,
             answer TEXT NOT NULL,
+            code TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS whitepaper_set_codes (
+            set_number INTEGER PRIMARY KEY,
             code TEXT NOT NULL
         )
         """
@@ -531,50 +584,198 @@ def check_hotel_detective_answers(
     return is_correct, code_row[0] if is_correct and code_row is not None else None
 
 
-def load_whitepaper_questions() -> list[dict[str, str]]:
-    questions = [
-        {"Question": "", "Correct answer": "", "Unlock code": ""}
-        for _ in range(20)
-    ]
+def get_hotel_detective_progress(team: str, set_number: int) -> dict[str, int]:
+    if (
+        isinstance(set_number, bool)
+        or not isinstance(set_number, int)
+        or set_number not in range(1, 5)
+    ):
+        raise ValueError("Set number must be between 1 and 4.")
     with closing(sqlite3.connect(ASSIGNMENT_DB_PATH, timeout=30)) as connection, connection:
         create_database_tables(connection)
-        for position, question, answer, code in connection.execute(
-            "SELECT position, question, answer, code FROM whitepaper_questions"
+        row = connection.execute(
+            """
+            SELECT wrong_attempts, penalty_seconds
+            FROM hotel_detective_progress
+            WHERE team = ? AND set_number = ?
+            """,
+            (team, set_number),
+        ).fetchone()
+    return {
+        "wrong_attempts": row[0] if row is not None else 0,
+        "penalty_seconds": row[1] if row is not None else 0,
+    }
+
+
+def get_or_assign_hotel_detective_set(
+    team: str, available_sets: list[int]
+) -> int:
+    if not team.strip() or not available_sets or any(
+        isinstance(set_number, bool)
+        or not isinstance(set_number, int)
+        or set_number not in range(1, 5)
+        for set_number in available_sets
+    ):
+        raise ValueError(
+            "A team and at least one valid Hotel Detective set are required."
+        )
+
+    available_sets = list(dict.fromkeys(available_sets))
+    with (
+        closing(sqlite3.connect(ASSIGNMENT_DB_PATH, timeout=30)) as connection,
+        connection,
+    ):
+        connection.execute("BEGIN IMMEDIATE")
+        create_database_tables(connection)
+        assignment = connection.execute(
+            "SELECT set_number FROM hotel_detective_assignments WHERE team = ?",
+            (team,),
+        ).fetchone()
+        if assignment is not None and assignment[0] in available_sets:
+            return assignment[0]
+
+        set_number = random.choice(available_sets)
+        connection.execute(
+            """
+            INSERT INTO hotel_detective_assignments (team, set_number)
+            VALUES (?, ?)
+            ON CONFLICT(team) DO UPDATE SET set_number = excluded.set_number
+            """,
+            (team, set_number),
+        )
+        return set_number
+
+
+def submit_hotel_detective_answers(
+    team: str, set_number: int, answers: list[bool]
+) -> dict[str, Any]:
+    is_correct, unlock_code = check_hotel_detective_answers(set_number, answers)
+    if is_correct:
+        progress = get_hotel_detective_progress(team, set_number)
+        return {
+            "is_correct": True,
+            "unlock_code": unlock_code,
+            **progress,
+            "added_penalty": 0,
+        }
+
+    penalty_settings = load_config()["round_penalties"]["2"]
+    with closing(sqlite3.connect(ASSIGNMENT_DB_PATH, timeout=30)) as connection, connection:
+        connection.execute("BEGIN IMMEDIATE")
+        create_database_tables(connection)
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO hotel_detective_progress (team, set_number)
+            VALUES (?, ?)
+            """,
+            (team, set_number),
+        )
+        progress = connection.execute(
+            """
+            SELECT wrong_attempts, penalty_seconds
+            FROM hotel_detective_progress
+            WHERE team = ? AND set_number = ?
+            """,
+            (team, set_number),
+        ).fetchone()
+        wrong_attempts = progress[0] + 1
+        added_penalty = (
+            penalty_settings["penalty_seconds"]
+            if wrong_attempts > penalty_settings["free_attempts"]
+            else 0
+        )
+        penalty_seconds = progress[1] + added_penalty
+        connection.execute(
+            """
+            UPDATE hotel_detective_progress
+            SET wrong_attempts = ?, penalty_seconds = ?
+            WHERE team = ? AND set_number = ?
+            """,
+            (wrong_attempts, penalty_seconds, team, set_number),
+        )
+    return {
+        "is_correct": False,
+        "unlock_code": None,
+        "wrong_attempts": wrong_attempts,
+        "penalty_seconds": penalty_seconds,
+        "added_penalty": added_penalty,
+    }
+
+
+def load_whitepaper_content() -> tuple[list[dict[str, str]], list[str]]:
+    questions = [{"Question": "", "Correct answer": ""} for _ in range(16)]
+    codes = [""] * 4
+    with closing(sqlite3.connect(ASSIGNMENT_DB_PATH, timeout=30)) as connection, connection:
+        create_database_tables(connection)
+        for set_number in range(1, 5):
+            first_position = (set_number - 1) * 4 + 1
+            legacy_code = connection.execute(
+                """
+                SELECT code FROM whitepaper_questions
+                WHERE position BETWEEN ? AND ? AND trim(code) != ''
+                ORDER BY position LIMIT 1
+                """,
+                (first_position, first_position + 3),
+            ).fetchone()
+            if legacy_code is not None:
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO whitepaper_set_codes (set_number, code)
+                    VALUES (?, ?)
+                    """,
+                    (set_number, legacy_code[0]),
+                )
+        for position, question, answer in connection.execute(
+            """
+            SELECT position, question, answer FROM whitepaper_questions
+            WHERE position BETWEEN 1 AND 16
+            """
         ):
             questions[position - 1] = {
                 "Question": question,
                 "Correct answer": answer,
-                "Unlock code": code,
             }
-    return questions
+        for set_number, code in connection.execute(
+            "SELECT set_number, code FROM whitepaper_set_codes"
+        ):
+            codes[set_number - 1] = code
+    return questions, codes
 
 
-def save_whitepaper_questions(questions: list[dict[str, Any]]) -> None:
-    if len(questions) != 20:
-        raise ValueError("Whitepaper search requires exactly 20 question slots.")
+def save_whitepaper_content(
+    questions: list[dict[str, Any]], codes: list[str]
+) -> None:
+    if len(questions) != 16 or len(codes) != 4:
+        raise ValueError("Round 3 requires 16 questions and 4 set unlock codes.")
 
     normalized_questions: list[tuple[int, str, str, str]] = []
     for position, row in enumerate(questions, start=1):
         values = []
-        for field in ("Question", "Correct answer", "Unlock code"):
+        for field in ("Question", "Correct answer"):
             value = row.get(field)
             if value is None or (isinstance(value, float) and math.isnan(value)):
                 value = ""
             values.append(str(value).strip())
-        question, answer, code = values
-        if not any(values):
-            continue
-        if not question or not answer or not code:
-            raise ValueError(
-                f"Question {position} needs a question, correct answer, and unlock code."
-            )
+        question, answer = values
+        if not question or not answer:
+            raise ValueError(f"Question {position} needs a question and correct answer.")
         if len(question) > 500:
             raise ValueError("Each question must be 500 characters or fewer.")
         if len(answer) > 200:
             raise ValueError("Each answer must be 200 characters or fewer.")
-        if len(code) > 100:
-            raise ValueError("Each unlock code must be 100 characters or fewer.")
-        normalized_questions.append((position, question, answer, code))
+        normalized_questions.append((position, question, answer, ""))
+
+    normalized_codes = []
+    for set_number, code in enumerate(codes, start=1):
+        if code is None or (isinstance(code, float) and math.isnan(code)):
+            normalized_code = ""
+        else:
+            normalized_code = str(code).strip()
+        if not normalized_code:
+            raise ValueError(f"Set {set_number} needs an unlock code.")
+        if len(normalized_code) > 100:
+            raise ValueError("Each set unlock code must be 100 characters or fewer.")
+        normalized_codes.append((set_number, normalized_code))
 
     with closing(sqlite3.connect(ASSIGNMENT_DB_PATH, timeout=30)) as connection, connection:
         connection.execute("BEGIN IMMEDIATE")
@@ -587,35 +788,56 @@ def save_whitepaper_questions(questions: list[dict[str, Any]]) -> None:
             """,
             normalized_questions,
         )
+        connection.execute("DELETE FROM whitepaper_set_codes")
+        connection.executemany(
+            """
+            INSERT INTO whitepaper_set_codes (set_number, code)
+            VALUES (?, ?)
+            """,
+            normalized_codes,
+        )
 
 
-def check_whitepaper_answer(
-    question_number: int, answer: str
+def check_whitepaper_set_answers(
+    set_number: int, answers: list[str]
 ) -> tuple[bool, Optional[str]]:
     if (
-        isinstance(question_number, bool)
-        or not isinstance(question_number, int)
-        or question_number not in range(1, 21)
+        isinstance(set_number, bool)
+        or not isinstance(set_number, int)
+        or set_number not in range(1, 5)
     ):
-        raise ValueError("Question number must be between 1 and 20.")
-    if not isinstance(answer, str) or not answer.strip():
-        raise ValueError("Enter an answer.")
+        raise ValueError("Set number must be between 1 and 4.")
+    if (
+        not isinstance(answers, list)
+        or len(answers) != 4
+        or any(not isinstance(answer, str) or not answer.strip() for answer in answers)
+    ):
+        raise ValueError("Enter an answer for all four questions.")
 
+    first_position = (set_number - 1) * 4 + 1
     with closing(sqlite3.connect(ASSIGNMENT_DB_PATH, timeout=30)) as connection, connection:
         create_database_tables(connection)
-        row = connection.execute(
+        rows = connection.execute(
             """
-            SELECT answer, code FROM whitepaper_questions
-            WHERE position = ?
+            SELECT answer FROM whitepaper_questions
+            WHERE position BETWEEN ? AND ?
+            ORDER BY position
             """,
-            (question_number,),
+            (first_position, first_position + 3),
+        ).fetchall()
+        code_row = connection.execute(
+            "SELECT code FROM whitepaper_set_codes WHERE set_number = ?",
+            (set_number,),
         ).fetchone()
-    if row is None:
-        raise ValueError(f"Question {question_number} is not ready yet.")
+    if len(rows) != 4 or code_row is None:
+        raise ValueError(f"Set {set_number} is not ready yet.")
 
     normalize = lambda value: " ".join(value.split()).casefold().encode("utf-8")
-    is_correct = hmac.compare_digest(normalize(answer), normalize(row[0]))
-    return is_correct, row[1] if is_correct else None
+    is_correct = all(
+        hmac.compare_digest(normalize(answer), normalize(row[0]))
+        for answer, row in zip(answers, rows)
+    )
+    return is_correct, code_row[0] if is_correct else None
 
 
 def validate_uploaded_image(image_data: bytes, description: str) -> bytes:
@@ -1648,6 +1870,13 @@ def submit_visual_puzzle_final_code(team: str, code: str) -> bool:
 def get_team_penalty_seconds(team: str) -> int:
     with closing(sqlite3.connect(ASSIGNMENT_DB_PATH, timeout=30)) as connection, connection:
         create_database_tables(connection)
+        hotel_detective_penalty = connection.execute(
+            """
+            SELECT COALESCE(SUM(penalty_seconds), 0)
+            FROM hotel_detective_progress WHERE team = ?
+            """,
+            (team,),
+        ).fetchone()[0]
         row = connection.execute(
             "SELECT penalty_seconds FROM visual_puzzle_progress WHERE team = ?",
             (team,),
@@ -1666,7 +1895,8 @@ def get_team_penalty_seconds(team: str) -> int:
             (team,),
         ).fetchone()
     return (
-        (row[0] if row is not None else 0)
+        hotel_detective_penalty
+        + (row[0] if row is not None else 0)
         + hidden_photo_penalty
         + (murder_mystery_penalty[0] if murder_mystery_penalty is not None else 0)
     )
@@ -1715,6 +1945,11 @@ def reset_team_games(teams: list[str], from_round: int = 1) -> None:
                         penalty_seconds = 0, completed = 0
                     WHERE team = ?
                     """,
+                    (team,),
+                )
+            if from_round <= 2:
+                connection.execute(
+                    "DELETE FROM hotel_detective_progress WHERE team = ?",
                     (team,),
                 )
             if from_round <= 5:
@@ -1842,19 +2077,32 @@ def finish_team_round_timer(
             ]
             if later_rounds:
                 next_round = min(later_rounds)
-                code = (
-                    unlock_code.strip()
-                    if isinstance(unlock_code, str) and unlock_code.strip()
-                    else secrets.token_hex(3).upper()
-                )
-                connection.execute(
-                    """
-                    INSERT OR IGNORE INTO team_round_unlock_codes
-                        (team, round_number, code)
-                    VALUES (?, ?, ?)
-                    """,
-                    (team, next_round, code),
-                )
+                code = unlock_code.strip() if isinstance(unlock_code, str) else ""
+                if code:
+                    connection.execute(
+                        """
+                        INSERT INTO team_round_unlock_codes
+                            (team, round_number, code)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(team, round_number) DO UPDATE SET
+                            entered_at = CASE
+                                WHEN team_round_unlock_codes.code != excluded.code
+                                THEN NULL
+                                ELSE team_round_unlock_codes.entered_at
+                            END,
+                            code = excluded.code
+                        """,
+                        (team, next_round, code),
+                    )
+                elif round_number != 1:
+                    connection.execute(
+                        """
+                        INSERT OR IGNORE INTO team_round_unlock_codes
+                            (team, round_number, code)
+                        VALUES (?, ?, ?)
+                        """,
+                        (team, next_round, secrets.token_hex(3).upper()),
+                    )
     if timer is None:
         raise ValueError("The team's round timer has not been started.")
     return timer
@@ -1880,14 +2128,66 @@ def get_round_unlock_code(team: str, round_number: int) -> Optional[str]:
         ).fetchone()
         if completed is None:
             return None
-        connection.execute(
-            """
-            INSERT OR IGNORE INTO team_round_unlock_codes
-                (team, round_number, code)
-            VALUES (?, ?, ?)
-            """,
-            (team, round_number, secrets.token_hex(3).upper()),
-        )
+        if round_number == 2:
+            assignment = connection.execute(
+                """
+                SELECT place_index FROM assignments
+                WHERE team = ? AND round_number = 1
+                """,
+                (team,),
+            ).fetchone()
+            if assignment is not None:
+                configured_code = load_config()["places"][assignment[0]].get(
+                    "entry_code", ""
+                )
+                configured_code = (
+                    configured_code.strip()
+                    if isinstance(configured_code, str)
+                    else ""
+                )
+                if not configured_code:
+                    connection.execute(
+                        """
+                        DELETE FROM team_round_unlock_codes
+                        WHERE team = ? AND round_number = ?
+                        """,
+                        (team, round_number),
+                    )
+                    return None
+                connection.execute(
+                    """
+                    INSERT INTO team_round_unlock_codes
+                        (team, round_number, code)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(team, round_number) DO UPDATE SET
+                        entered_at = CASE
+                            WHEN team_round_unlock_codes.code != excluded.code
+                            THEN NULL
+                            ELSE team_round_unlock_codes.entered_at
+                        END,
+                        code = excluded.code
+                    """,
+                    (team, round_number, configured_code),
+                )
+            else:
+                existing = connection.execute(
+                    """
+                    SELECT code FROM team_round_unlock_codes
+                    WHERE team = ? AND round_number = ?
+                    """,
+                    (team, round_number),
+                ).fetchone()
+                if existing is None:
+                    return None
+        else:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO team_round_unlock_codes
+                    (team, round_number, code)
+                VALUES (?, ?, ?)
+                """,
+                (team, round_number, secrets.token_hex(3).upper()),
+            )
         row = connection.execute(
             """
             SELECT code FROM team_round_unlock_codes
@@ -2021,6 +2321,12 @@ def get_admin_team_timing(
             )
         }
         for penalty_rows in (
+            connection.execute(
+                """
+                SELECT team, COALESCE(SUM(penalty_seconds), 0)
+                FROM hotel_detective_progress GROUP BY team
+                """
+            ),
             connection.execute(
                 """
                 SELECT team, COALESCE(SUM(penalty_seconds), 0)
@@ -2219,6 +2525,8 @@ def validate_config(config: dict[str, Any]) -> None:
             or not place["puzzle"].strip()
             or not isinstance(place.get("room_number"), str)
             or not place["room_number"].strip()
+            or not isinstance(place.get("entry_code", ""), str)
+            or len(place.get("entry_code", "")) > 200
             or not isinstance(place.get("locations"), list)
             or not place["locations"]
         ):
@@ -2286,6 +2594,21 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError(
             "Round 6 supports at most 15 teams because each team gets a unique mystery."
         )
+    game_instructions = config.get("game_instructions", GAME_INSTRUCTION_DEFAULTS)
+    if not isinstance(game_instructions, dict):
+        raise ValueError("game_instructions must be an object.")
+    for instruction_type in ("dos", "donts"):
+        instructions = game_instructions.get(instruction_type)
+        if not isinstance(instructions, list) or any(
+            not isinstance(instruction, str)
+            or not instruction.strip()
+            or len(instruction) > 500
+            for instruction in instructions
+        ):
+            raise ValueError(
+                f"game_instructions.{instruction_type} must be a list of "
+                "non-empty strings of at most 500 characters."
+            )
     revision = config.get("config_revision", 0)
     if not isinstance(revision, int) or isinstance(revision, bool) or revision < 0:
         raise ValueError("config_revision must be a non-negative integer.")
@@ -2296,6 +2619,18 @@ def load_config() -> dict[str, Any]:
         config = json.load(config_file)
     if isinstance(config, dict):
         config.pop("rounds", None)
+        configured_instructions = config.setdefault(
+            "game_instructions", copy.deepcopy(GAME_INSTRUCTION_DEFAULTS)
+        )
+        if isinstance(configured_instructions, dict):
+            for instruction_type, defaults in GAME_INSTRUCTION_DEFAULTS.items():
+                configured_instructions.setdefault(
+                    instruction_type, copy.deepcopy(defaults)
+                )
+        if isinstance(config.get("places"), list):
+            for place in config["places"]:
+                if isinstance(place, dict):
+                    place.setdefault("entry_code", "")
         configured_penalties = config.setdefault("round_penalties", {})
         if isinstance(configured_penalties, dict):
             for round_number, defaults in ROUND_PENALTY_DEFAULTS.items():
@@ -2361,7 +2696,8 @@ def room_group_ranges(place_count: int) -> list[tuple[int, int]]:
 def render_hotel_detective_admin(st: Any) -> None:
     st.subheader(round_title(2))
     st.caption(
-        "Enter up to 20 statements in order. Each consecutive group of five is a set."
+        "Enter up to 20 statements in order. Each consecutive group of five is a "
+        "set, and teams are randomly assigned a complete set."
     )
     try:
         statements, codes = load_hotel_detective_content()
@@ -2438,58 +2774,81 @@ def render_hotel_detective_admin(st: Any) -> None:
 def render_whitepaper_search_admin(st: Any) -> None:
     st.subheader(round_title(3))
     st.caption(
-        "Enter up to 20 questions from IXO whitepapers, their correct answers, "
-        "and the code to reveal for each correct answer."
+        "Configure four sets of four questions from IXO whitepapers. Teams must "
+        "answer all four questions in a set correctly to reveal that set's code."
     )
     try:
-        questions = load_whitepaper_questions()
+        questions, codes = load_whitepaper_content()
     except sqlite3.Error as error:
         st.error(f"Could not load whitepaper questions: {error}")
         return
 
     question_rows = [
-        {"Question #": position, **row}
+        {
+            "Set": f"Set {(position - 1) // 4 + 1}",
+            "Question #": position,
+            **row,
+        }
         for position, row in enumerate(questions, start=1)
+    ]
+    code_rows = [
+        {"Set": f"Set {set_number}", "Unlock code": code}
+        for set_number, code in enumerate(codes, start=1)
     ]
     with st.form("admin_whitepaper_questions"):
         edited_questions = st.data_editor(
             question_rows,
             num_rows="fixed",
             hide_index=True,
-            disabled=["Question #"],
+            disabled=["Set", "Question #"],
             column_config={
+                "Set": st.column_config.TextColumn("Set"),
                 "Question #": st.column_config.NumberColumn("Question #"),
                 "Question": st.column_config.TextColumn("Question", max_chars=500),
                 "Correct answer": st.column_config.TextColumn(
                     "Correct answer", max_chars=200
                 ),
+            },
+            key="admin_whitepaper_questions",
+        )
+        edited_codes = st.data_editor(
+            code_rows,
+            num_rows="fixed",
+            hide_index=True,
+            disabled=["Set"],
+            column_config={
+                "Set": st.column_config.TextColumn("Set"),
                 "Unlock code": st.column_config.TextColumn(
                     "Unlock code", max_chars=100
                 ),
             },
-            key="admin_whitepaper_questions",
+            key="admin_whitepaper_set_codes",
         )
         save_submitted = st.form_submit_button(
-            "Save whitepaper questions", type="primary"
+            "Save Round 3 questions", type="primary"
         )
 
     if save_submitted:
         try:
-            save_whitepaper_questions(
+            save_whitepaper_content(
                 [
                     {
                         "Question": row["Question"],
                         "Correct answer": row["Correct answer"],
-                        "Unlock code": row["Unlock code"],
                     }
                     for row in editor_records(edited_questions)
-                ]
+                ],
+                [
+                    row["Unlock code"]
+                    for row in editor_records(edited_codes)
+                ],
             )
         except (ValueError, TypeError, KeyError, sqlite3.Error) as error:
-            st.error(f"Could not save whitepaper questions: {error}")
+            st.error(f"Could not save Round 3 questions: {error}")
         else:
             st.session_state.pop("admin_whitepaper_questions", None)
-            st.success("Whitepaper questions saved.")
+            st.session_state.pop("admin_whitepaper_set_codes", None)
+            st.success("Round 3 questions saved.")
             st.rerun()
 
 
@@ -2882,34 +3241,53 @@ def render_hidden_photograph_reviews(st: Any, config: dict[str, Any]) -> None:
 
 def render_whitepaper_search(st: Any, selected_round: int, rounds: list[int]) -> None:
     st.subheader(round_title(3))
-    st.caption("These questions are from IXO whitepapers.")
+    st.caption(
+        "Choose a set and answer all four questions. These questions are from "
+        "IXO whitepapers."
+    )
     try:
-        questions = load_whitepaper_questions()
+        questions, codes = load_whitepaper_content()
     except sqlite3.Error as error:
         st.error(f"Could not load whitepaper questions: {error}")
         return
 
-    available_questions = [
-        index for index, row in enumerate(questions) if row["Question"]
-    ]
-    if not available_questions:
-        st.info("This round is not ready yet. Please ask an admin to configure it.")
-        return
-    question_number = st.selectbox(
-        "Question",
-        available_questions,
-        format_func=lambda index: f"Question {index + 1}",
+    questions_incomplete = any(
+        not question["Question"] or not question["Correct answer"]
+        for question in questions
     )
-    selected_question = questions[question_number]
-    with st.form(f"whitepaper_question_{question_number + 1}"):
-        st.write(selected_question["Question"])
-        answer = st.text_input("Your answer")
-        submitted = st.form_submit_button("Check answer", type="primary")
+    codes_incomplete = any(not code for code in codes)
+    if questions_incomplete or codes_incomplete:
+        st.info(
+            "This round is not ready yet. Please ask an admin to configure all "
+            "four question sets and their unlock codes."
+        )
+        return
+    set_number = st.selectbox(
+        "Question set",
+        range(1, 5),
+        format_func=lambda value: f"Set {value}",
+    )
+    first_index = (set_number - 1) * 4
+    selected_questions = questions[first_index : first_index + 4]
+    with st.form(f"whitepaper_question_set_{set_number}"):
+        answers = []
+        for question_index, question in enumerate(selected_questions, start=1):
+            st.write(f"{question_index}. {question['Question']}")
+            answers.append(
+                st.text_input(
+                    f"Answer {question_index}",
+                    key=f"whitepaper_answer_{set_number}_{question_index}",
+                )
+            )
+        submitted = st.form_submit_button("Check all answers", type="primary")
 
     if submitted:
+        if any(not answer.strip() for answer in answers):
+            st.warning("Enter an answer for all four questions.")
+            return
         try:
-            is_correct, unlock_code = check_whitepaper_answer(
-                question_number + 1, answer
+            is_correct, unlock_code = check_whitepaper_set_answers(
+                set_number, answers
             )
         except (ValueError, sqlite3.Error) as error:
             st.error(f"Could not check the answer: {error}")
@@ -2924,7 +3302,6 @@ def render_whitepaper_search(st: Any, selected_round: int, rounds: list[int]) ->
             except (ValueError, sqlite3.Error) as error:
                 st.error(f"Could not save Round {selected_round} time: {error}")
                 return
-            st.success(f"Correct! Your next code is: {unlock_code}")
             if selected_round == max(rounds):
                 try:
                     finish_team_timer(st.session_state.selected_team)
@@ -2932,19 +3309,47 @@ def render_whitepaper_search(st: Any, selected_round: int, rounds: list[int]) ->
                     st.error(f"Could not finish the team timer: {error}")
                 else:
                     st.success("Final round completed!")
+            else:
+                st.rerun()
         else:
-            st.error("Not quite. Review the question and try again.")
+            st.error("Not quite. Review all four questions and try again.")
 
 
-def render_hotel_detective(st: Any) -> None:
+def render_hotel_detective(st: Any, team: str, config: dict[str, Any]) -> None:
     st.subheader(round_title(2))
-    set_number = st.selectbox("Statement set", range(1, 5), format_func=lambda value: f"Set {value}")
+    penalty_settings = config["round_penalties"]["2"]
     try:
         statements, codes = load_hotel_detective_content()
-    except sqlite3.Error as error:
-        st.error(f"Could not load Hotel Detective content: {error}")
+        available_sets = [
+            set_number
+            for set_number in range(1, 5)
+            if codes[set_number - 1]
+            and all(
+                row["Statement"]
+                and row["Correct answer"] in ("True", "False")
+                for row in statements[
+                    (set_number - 1) * 5 : set_number * 5
+                ]
+            )
+        ]
+        if not available_sets:
+            st.info(
+                "This round is not ready yet. Please ask an admin to configure "
+                "at least one complete statement set and its unlock code."
+            )
+            return
+        set_number = get_or_assign_hotel_detective_set(team, available_sets)
+        progress = get_hotel_detective_progress(team, set_number)
+    except (ValueError, sqlite3.Error) as error:
+        st.error(f"Could not load Hotel Detective content or progress: {error}")
         return
 
+    st.caption(f"Assigned statement set: Set {set_number}")
+    st.caption(
+        f"Wrong attempts on this set: {progress['wrong_attempts']} "
+        f"(first {penalty_settings['free_attempts']} are free). "
+        f"Round 2 penalties: {format_elapsed_time(progress['penalty_seconds'])}."
+    )
     first_index = (set_number - 1) * 5
     selected_statements = statements[first_index : first_index + 5]
     if any(
@@ -2975,23 +3380,35 @@ def render_hotel_detective(st: Any) -> None:
             st.warning("Choose True or False for all five statements.")
             return
         try:
-            is_correct, unlock_code = check_hotel_detective_answers(
-                set_number, [answer == "True" for answer in answers]
+            result = submit_hotel_detective_answers(
+                team, set_number, [answer == "True" for answer in answers]
             )
         except (ValueError, sqlite3.Error) as error:
             st.error(f"Could not check the answers: {error}")
             return
-        if is_correct and unlock_code:
+        if result["is_correct"] and result["unlock_code"]:
             try:
                 finish_team_round_timer(
-                    st.session_state.selected_team, 2, unlock_code=unlock_code
+                    team, 2, unlock_code=result["unlock_code"]
                 )
             except (ValueError, sqlite3.Error) as error:
                 st.error(f"Could not save Round 2 time: {error}")
                 return
-            st.success(f"Correct! Enter this code to continue: {unlock_code}")
+            st.rerun()
         else:
-            st.error("Not quite. Review the statements and try again.")
+            if result["added_penalty"]:
+                st.error(
+                    "Not quite. A "
+                    f"{format_elapsed_time(result['added_penalty'])} "
+                    "penalty has been added to your time."
+                )
+            else:
+                st.error("Not quite. Review the statements and try again.")
+            st.caption(
+                f"Wrong attempts on this set: {result['wrong_attempts']}. "
+                f"Accumulated Round 2 penalties: "
+                f"{format_elapsed_time(result['penalty_seconds'])}."
+            )
 
 
 def continue_after_visual_puzzle(
@@ -3024,7 +3441,10 @@ def render_round_unlock_gate(st: Any, team: str, round_number: int) -> bool:
     try:
         code = get_round_unlock_code(team, round_number)
         if code is None:
-            st.info("Complete the previous round to unlock this round.")
+            st.info(
+                "The previous round's entry code is not configured or it has not "
+                "been completed. Please ask an organizer for help."
+            )
             if st.button("Back to rounds", key=f"round_unlock_back_{round_number}"):
                 st.session_state.screen = "round"
                 st.rerun()
@@ -3095,9 +3515,12 @@ def render_visual_puzzle(
         return
 
     for position in range(1, min(current_position, VISUAL_PUZZLE_COUNT + 1)):
-        st.success(
-            f"Puzzle {position} solved — code segment: "
-            f"{assigned_puzzles[position - 1]['Code segment']}"
+        st.success(f"Puzzle {position} solved.")
+        st.image(
+            create_riddle_image(
+                f"Code segment: {assigned_puzzles[position - 1]['Code segment']}"
+            ),
+            use_container_width=True,
         )
 
     if current_position <= VISUAL_PUZZLE_COUNT:
@@ -3180,10 +3603,13 @@ def render_hidden_photograph(st: Any, team: str) -> None:
     st.image(state["reference_image"], use_container_width=True)
     if state["code"] is not None:
         try:
+            round_already_completed = get_round_unlock_code(team, 6) is not None
             finish_team_round_timer(team, 5, unlock_code=state["code"])
         except (ValueError, sqlite3.Error) as error:
             st.error(f"Could not save Round 5 time: {error}")
             return
+        if not round_already_completed:
+            st.rerun()
 
     if state["reviewed"]:
         if state["is_correct"]:
@@ -3630,15 +4056,50 @@ def render_admin(st: Any, config: dict[str, Any]) -> None:
                     step=1,
                     key="admin_team_count",
                 )
+            st.subheader("Global Do's and Don'ts")
+            st.caption("Enter one item per line. Leave a field empty to hide that list.")
+            instruction_columns = st.columns(2)
+            with instruction_columns[0]:
+                dos_text = st.text_area(
+                    "Do",
+                    value="\n".join(config["game_instructions"]["dos"]),
+                    max_chars=10_000,
+                    key="admin_game_dos",
+                )
+            with instruction_columns[1]:
+                donts_text = st.text_area(
+                    "Don't",
+                    value="\n".join(config["game_instructions"]["donts"]),
+                    max_chars=10_000,
+                    key="admin_game_donts",
+                )
             st.subheader("Free attempts and penalties")
             st.caption(
-                "Free incorrect attempts are counted separately for each image "
-                "in Round 4 and each puzzle in Round 6. Penalties are added per "
-                "incorrect answer; Round 5 is penalized when a photo is marked "
-                "incorrect."
+                "Free incorrect attempts are counted separately for each statement "
+                "set in Round 2, each image in Round 4, and each puzzle in Round 6. "
+                "Penalties apply to later wrong answers; Round 5 is penalized when "
+                "a photo is marked incorrect."
             )
-            penalty_columns = st.columns(3)
+            penalty_columns = st.columns(4)
             with penalty_columns[0]:
+                st.markdown("**Round 2 — Hotel Detective**")
+                round2_free_attempts = st.number_input(
+                    "Free incorrect attempts per set",
+                    min_value=0,
+                    max_value=100,
+                    value=config["round_penalties"]["2"]["free_attempts"],
+                    step=1,
+                    key="admin_round2_free_attempts",
+                )
+                round2_penalty_seconds = st.number_input(
+                    "Penalty per later wrong answer (seconds)",
+                    min_value=0,
+                    max_value=3600,
+                    value=config["round_penalties"]["2"]["penalty_seconds"],
+                    step=30,
+                    key="admin_round2_penalty_seconds",
+                )
+            with penalty_columns[1]:
                 st.markdown("**Round 4 — Image Enigma**")
                 round4_free_attempts = st.number_input(
                     "Free incorrect attempts per image",
@@ -3656,7 +4117,7 @@ def render_admin(st: Any, config: dict[str, Any]) -> None:
                     step=30,
                     key="admin_round4_penalty_seconds",
                 )
-            with penalty_columns[1]:
+            with penalty_columns[2]:
                 st.markdown("**Round 5 — The Hidden Lens**")
                 st.caption("No free-attempt setting; penalty applies to an incorrect photo review.")
                 round5_penalty_seconds = st.number_input(
@@ -3667,7 +4128,7 @@ def render_admin(st: Any, config: dict[str, Any]) -> None:
                     step=30,
                     key="admin_round5_penalty_seconds",
                 )
-            with penalty_columns[2]:
+            with penalty_columns[3]:
                 st.markdown("**Round 6 — The Final Case**")
                 round6_free_attempts = st.number_input(
                     "Free incorrect attempts per puzzle",
@@ -3695,7 +4156,23 @@ def render_admin(st: Any, config: dict[str, Any]) -> None:
             updated_config["teams"] = team_names_for_count(
                 config["teams"], int(team_count)
             )
+            updated_config["game_instructions"] = {
+                "dos": [
+                    instruction.strip()
+                    for instruction in dos_text.splitlines()
+                    if instruction.strip()
+                ],
+                "donts": [
+                    instruction.strip()
+                    for instruction in donts_text.splitlines()
+                    if instruction.strip()
+                ],
+            }
             updated_config["round_penalties"] = {
+                "2": {
+                    "free_attempts": int(round2_free_attempts),
+                    "penalty_seconds": int(round2_penalty_seconds),
+                },
                 "4": {
                     "free_attempts": int(round4_free_attempts),
                     "penalty_seconds": int(round4_penalty_seconds),
@@ -3710,6 +4187,10 @@ def render_admin(st: Any, config: dict[str, Any]) -> None:
                 updated_config,
                 (
                     "admin_team_count",
+                    "admin_game_dos",
+                    "admin_game_donts",
+                    "admin_round2_free_attempts",
+                    "admin_round2_penalty_seconds",
                     "admin_round4_free_attempts",
                     "admin_round4_penalty_seconds",
                     "admin_round5_penalty_seconds",
@@ -3747,8 +4228,8 @@ def render_admin(st: Any, config: dict[str, Any]) -> None:
         with st.form("admin_round_one_configuration"):
             st.subheader(f"{round_title(1)} - Places and puzzles")
             st.caption(
-                "Edit each place name, puzzle, and the room revealed by a correct "
-                "coordinate entry."
+                "Edit each place name, puzzle, room number, and the Round 2 entry "
+                "code that participants find at that location."
             )
             place_rows = [
                 {
@@ -3756,6 +4237,7 @@ def render_admin(st: Any, config: dict[str, Any]) -> None:
                     "Place name": place["name"],
                     "Puzzle": place["puzzle"],
                     "Room number": place["room_number"],
+                    "Round 2 entry code": place.get("entry_code", ""),
                 }
                 for index, place in enumerate(config["places"])
             ]
@@ -3771,6 +4253,9 @@ def render_admin(st: Any, config: dict[str, Any]) -> None:
                     ),
                     "Room number": st.column_config.TextColumn(
                         "Room number", max_chars=100
+                    ),
+                    "Round 2 entry code": st.column_config.TextColumn(
+                        "Round 2 entry code", max_chars=200
                     ),
                 },
                 key="admin_places",
@@ -3819,12 +4304,22 @@ def render_admin(st: Any, config: dict[str, Any]) -> None:
 
         if save_submitted:
             updated_config = copy.deepcopy(config)
-            for place, row in zip(
-                updated_config["places"], editor_records(edited_place_rows)
+            place_edits = editor_records(edited_place_rows)
+            entry_codes = [
+                "" if row["Round 2 entry code"] is None
+                else str(row["Round 2 entry code"]).strip()
+                for row in place_edits
+            ]
+            if any(not entry_code for entry_code in entry_codes):
+                st.error("Enter a Round 2 entry code for every Round 1 puzzle.")
+                return
+            for place, row, entry_code in zip(
+                updated_config["places"], place_edits, entry_codes
             ):
                 place["name"] = str(row["Place name"]).strip()
                 place["puzzle"] = str(row["Puzzle"])
                 place["room_number"] = str(row["Room number"]).strip()
+                place["entry_code"] = entry_code
             for row, (place_index, location_index) in zip(
                 editor_records(edited_location_rows), location_references
             ):
@@ -3921,6 +4416,7 @@ def main() -> None:
             "assigned_place_index",
             "rules_acknowledged",
             "team_reset_revision",
+            "round_one_room_reveal",
         ):
             st.session_state.pop(key, None)
         st.session_state.pop("assignment_revision", None)
@@ -3933,7 +4429,12 @@ def main() -> None:
             st.error(f"Could not check team reset status: {error}")
             return
         if revision != st.session_state.get("team_reset_revision", 0):
-            for key in ("selected_round", "assigned_place_index", "assignment_revision"):
+            for key in (
+                "selected_round",
+                "assigned_place_index",
+                "assignment_revision",
+                "round_one_room_reveal",
+            ):
                 st.session_state.pop(key, None)
             st.session_state.team_reset_revision = revision
             st.session_state.rules_acknowledged = False
@@ -3948,7 +4449,12 @@ def main() -> None:
         render_team_timer(st, st.session_state.selected_team)
     if st.session_state.screen == "lookup":
         st.caption(round_title(st.session_state.selected_round))
-        if st.session_state.selected_round > min(ROUND_NUMBERS):
+        if (
+            st.session_state.selected_round > min(ROUND_NUMBERS)
+            and not admin_round_access_enabled(
+                st.session_state.get("admin_authenticated", False)
+            )
+        ):
             if not render_round_unlock_gate(
                 st,
                 st.session_state.selected_team,
@@ -4003,18 +4509,21 @@ def main() -> None:
             "and enter your answers in the app. Ask an organizer if a rule or clue "
             "is unclear."
         )
-        st.markdown(
-            """
-            **Do**
-            - Keep your team together and follow organizer directions.
-            - Share your team's ideas with one another and submit answers through the app.
-            - Keep track of clues and unlock codes your team earns.
-
-            **Don't**
-            - Share clues, answers, or unlock codes with other teams.
-            - Interfere with another team's work or try to bypass or alter the game.
-            """
-        )
+        game_instructions = config["game_instructions"]
+        if game_instructions["dos"]:
+            st.markdown("**Do**")
+            st.markdown(
+                "\n".join(
+                    f"- {instruction}" for instruction in game_instructions["dos"]
+                )
+            )
+        if game_instructions["donts"]:
+            st.markdown("**Don't**")
+            st.markdown(
+                "\n".join(
+                    f"- {instruction}" for instruction in game_instructions["donts"]
+                )
+            )
         st.info(
             "Your timer starts when you continue below and keeps running if you "
             "refresh or leave the page. It stops when your team completes the final round."
@@ -4062,17 +4571,24 @@ def main() -> None:
 
     if st.session_state.screen == "round":
         st.subheader("Select a round")
-        try:
-            unlocked_rounds = get_unlocked_rounds(
-                st.session_state.selected_team, ROUND_NUMBERS
-            )
-        except sqlite3.Error as error:
-            st.error(f"Could not load round progress: {error}")
-            return
-        st.caption(
-            "Complete each round to unlock the next. You can return to any "
-            "unlocked round."
+        local_admin_access = admin_round_access_enabled(
+            st.session_state.get("admin_authenticated", False)
         )
+        if local_admin_access:
+            unlocked_rounds = ROUND_NUMBERS
+            st.info("Local mode: admins can access any round.")
+        else:
+            try:
+                unlocked_rounds = get_unlocked_rounds(
+                    st.session_state.selected_team, ROUND_NUMBERS
+                )
+            except sqlite3.Error as error:
+                st.error(f"Could not load round progress: {error}")
+                return
+            st.caption(
+                "Complete each round to unlock the next. You can return to any "
+                "unlocked round."
+            )
         with st.form("round_selection"):
             selected_round = st.selectbox(
                 "Round",
@@ -4110,15 +4626,27 @@ def main() -> None:
             st.error(f"Could not load the next round's entry code: {error}")
             return
         if next_code is not None:
-            st.success(
-                f"Code to enter in {round_title(min(next_rounds))}: {next_code}"
-            )
+            next_round = min(next_rounds)
+            if st.session_state.selected_round != min(ROUND_NUMBERS):
+                st.success(
+                    f"Code to enter in {round_title(next_round)}: {next_code}"
+                )
+            if st.button(
+                f"Continue to Round {next_round}",
+                type="primary",
+                key=f"continue_to_round_{next_round}",
+            ):
+                st.session_state.selected_round = next_round
+                st.session_state.screen = "lookup"
+                st.rerun()
 
     if st.session_state.selected_round == 2:
         if st.button("Back to rounds"):
             st.session_state.screen = "round"
             st.rerun()
-        render_hotel_detective(st)
+        render_hotel_detective(
+            st, st.session_state.selected_team, config
+        )
         return
 
     if st.session_state.selected_round == 3:
@@ -4204,11 +4732,19 @@ def main() -> None:
             if room_number is None:
                 st.warning("Those coordinates do not match your clue. Try again.")
             else:
-                st.success(f"Room {room_number}")
+                place = config["places"][st.session_state.assigned_place_index]
+                entry_code = place.get("entry_code", "").strip()
+                if not entry_code:
+                    st.error(
+                        "This Round 1 puzzle's entry code is not configured. "
+                        "Please ask an organizer for help."
+                    )
+                    return
                 try:
                     finish_team_round_timer(
                         st.session_state.selected_team,
                         st.session_state.selected_round,
+                        unlock_code=entry_code,
                     )
                 except (ValueError, sqlite3.Error) as error:
                     st.error(
@@ -4216,24 +4752,15 @@ def main() -> None:
                         f"{error}"
                     )
                     return
-                next_rounds = [
-                    number
-                    for number in ROUND_NUMBERS
-                    if number > st.session_state.selected_round
-                ]
-                if next_rounds:
-                    try:
-                        unlock_code = get_round_unlock_code(
-                            st.session_state.selected_team, min(next_rounds)
-                        )
-                    except (ValueError, sqlite3.Error) as error:
-                        st.error(f"Could not load the next round's code: {error}")
-                        return
-                    if unlock_code is not None:
-                        st.success(
-                            "Code to enter in "
-                            f"{round_title(min(next_rounds))}: {unlock_code}"
-                        )
+                st.session_state.round_one_room_reveal = {
+                    "team": st.session_state.selected_team,
+                    "place_index": st.session_state.assigned_place_index,
+                    "assignment_revision": st.session_state.get(
+                        "assignment_revision"
+                    ),
+                    "room_number": room_number,
+                }
+                st.rerun()
                 if st.session_state.selected_round == max(ROUND_NUMBERS):
                     try:
                         finish_team_timer(st.session_state.selected_team)
@@ -4241,6 +4768,16 @@ def main() -> None:
                         st.error(f"Could not finish the team timer: {error}")
                     else:
                         st.success("Final round completed!")
+        revealed_room = st.session_state.get("round_one_room_reveal")
+        if (
+            isinstance(revealed_room, dict)
+            and revealed_room.get("team") == st.session_state.selected_team
+            and revealed_room.get("place_index")
+            == st.session_state.assigned_place_index
+            and revealed_room.get("assignment_revision")
+            == st.session_state.get("assignment_revision")
+        ):
+            st.success(f"Room {revealed_room['room_number']}")
         else:
             st.info("Enter the landmark's coordinates to find its room.")
 

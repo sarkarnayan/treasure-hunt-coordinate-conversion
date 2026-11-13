@@ -1,31 +1,39 @@
 from io import BytesIO
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from PIL import Image
 from streamlit.testing.v1 import AppTest
 
 from app import (
+    admin_round_access_enabled,
     create_riddle_image,
+    create_database_tables,
     check_hotel_detective_answers,
-    check_whitepaper_answer,
+    submit_hotel_detective_answers,
+    check_whitepaper_set_answers,
     finish_team_timer,
     find_nearest_place,
     get_or_assign_place,
+    get_or_assign_hotel_detective_set,
     get_admin_team_timing,
     get_hidden_photograph_state,
     get_murder_mystery_state,
     get_visual_puzzle_progress,
     get_team_penalty_seconds,
+    get_hotel_detective_progress,
     load_hotel_detective_content,
     load_hidden_photograph_content,
     load_hidden_photograph_submissions,
     load_murder_mystery_content,
-    load_whitepaper_questions,
+    load_whitepaper_content,
+    render_whitepaper_search,
+    render_visual_puzzle,
     load_visual_puzzle_content,
     get_team_timer,
     get_unlocked_rounds,
@@ -40,7 +48,7 @@ from app import (
     save_hotel_detective_content,
     save_hidden_photograph_content,
     save_murder_mystery_content,
-    save_whitepaper_questions,
+    save_whitepaper_content,
     save_visual_puzzle_content,
     start_team_timer,
     start_team_round_timer,
@@ -180,12 +188,17 @@ class CoordinateLookupTests(unittest.TestCase):
         validate_config(config)
         self.assertNotIn("rounds", config)
         self.assertEqual(ROUND_NUMBERS, [1, 2, 3, 4, 5, 6])
+        self.assertEqual(config["round_penalties"]["2"]["free_attempts"], 3)
+        self.assertEqual(config["round_penalties"]["2"]["penalty_seconds"], 120)
         self.assertEqual(config["round_penalties"]["4"]["free_attempts"], 3)
         self.assertEqual(config["round_penalties"]["5"]["penalty_seconds"], 120)
+        self.assertTrue(config["game_instructions"]["dos"])
+        self.assertTrue(config["game_instructions"]["donts"])
 
     def test_legacy_config_loads_default_round_penalty_settings(self):
         config = load_config()
         config.pop("round_penalties")
+        config.pop("game_instructions")
         config["rounds"] = [1]
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "places.json"
@@ -194,11 +207,106 @@ class CoordinateLookupTests(unittest.TestCase):
                 loaded = load_config()
 
         self.assertEqual(loaded["round_penalties"]["4"]["free_attempts"], 3)
+        self.assertEqual(loaded["round_penalties"]["2"]["free_attempts"], 3)
         self.assertEqual(loaded["round_penalties"]["6"]["penalty_seconds"], 120)
+        self.assertEqual(
+            loaded["game_instructions"]["dos"],
+            load_config()["game_instructions"]["dos"],
+        )
         self.assertNotIn("rounds", loaded)
+
+    def test_game_instructions_require_non_empty_short_strings(self):
+        config = load_config()
+        config["game_instructions"]["dos"] = [""]
+
+        with self.assertRaisesRegex(ValueError, "game_instructions.dos"):
+            validate_config(config)
+
+    def test_admin_can_configure_global_dos_and_donts(self):
+        config = load_config()
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "places.json"
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            with (
+                patch("app.CONFIG_PATH", config_path),
+                patch(
+                    "app.ASSIGNMENT_DB_PATH",
+                    Path(directory) / "assignments.sqlite3",
+                ),
+                patch("app.render_team_timer"),
+                patch.dict(
+                    os.environ,
+                    {
+                        "TREASURE_HUNT_ADMIN_USER": "admin",
+                        "TREASURE_HUNT_ADMIN_PASSWORD": "secret",
+                    },
+                ),
+            ):
+                admin_app = AppTest.from_string(
+                    "from app import main\nmain()", default_timeout=15
+                )
+                admin_app.session_state.admin_authenticated = True
+                admin_app.run()
+                admin_app.sidebar.radio[0].set_value("Admin")
+                admin_app.run()
+                next(
+                    radio
+                    for radio in admin_app.sidebar.radio
+                    if radio.label == "Admin menu"
+                ).set_value("Game settings")
+                admin_app.run()
+
+                next(
+                    field for field in admin_app.text_area if field.label == "Do"
+                ).set_value("Stay together\nKeep a clue log")
+                next(
+                    field for field in admin_app.text_area if field.label == "Don't"
+                ).set_value("Do not share codes")
+                next(
+                    button
+                    for button in admin_app.button
+                    if button.label == "Save game settings"
+                ).click().run()
+
+                self.assertFalse(admin_app.exception)
+                saved_config = load_config()
+                self.assertEqual(
+                    saved_config["game_instructions"],
+                    {
+                        "dos": ["Stay together", "Keep a clue log"],
+                        "donts": ["Do not share codes"],
+                    },
+                )
+
+                participant_app = AppTest.from_string(
+                    "from app import main\nmain()", default_timeout=15
+                )
+                participant_app.session_state.screen = "instructions"
+                participant_app.session_state.selected_team = "Team 1"
+                participant_app.run()
+
+                self.assertFalse(participant_app.exception)
+                displayed_instructions = [
+                    markdown.value for markdown in participant_app.markdown
+                ]
+                self.assertTrue(
+                    any("Stay together" in text for text in displayed_instructions)
+                )
+                self.assertTrue(
+                    any(
+                        "Do not share codes" in text
+                        for text in displayed_instructions
+                    )
+                )
 
     def test_round_penalty_config_rejects_negative_values(self):
         config = load_config()
+        config["round_penalties"]["2"]["free_attempts"] = -1
+
+        with self.assertRaisesRegex(ValueError, "between 0 and 100"):
+            validate_config(config)
+
+        config["round_penalties"]["2"]["free_attempts"] = 3
         config["round_penalties"]["4"]["free_attempts"] = -1
 
         with self.assertRaisesRegex(ValueError, "between 0 and 100"):
@@ -233,6 +341,40 @@ class CoordinateLookupTests(unittest.TestCase):
             verify_admin_credentials("other", "secret", "admin", "secret")
         )
 
+    def test_local_round_access_requires_authenticated_admin(self):
+        with patch.dict(os.environ, {"environment": "LOCAL"}):
+            self.assertTrue(admin_round_access_enabled(True))
+            self.assertFalse(admin_round_access_enabled(False))
+        with patch.dict(os.environ, {"environment": "PRODUCTION"}):
+            self.assertFalse(admin_round_access_enabled(True))
+
+    def test_local_admin_can_open_locked_round_without_entry_code(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                patch("app.ASSIGNMENT_DB_PATH", Path(directory) / "local.sqlite3"),
+                patch("app.render_team_timer"),
+                patch.dict(os.environ, {"environment": "LOCAL"}),
+            ):
+                start_team_timer("Team 1")
+                app = AppTest.from_string(
+                    "from app import main\nmain()", default_timeout=15
+                )
+                app.session_state.screen = "round"
+                app.session_state.selected_team = "Team 1"
+                app.session_state.admin_authenticated = True
+                app.run()
+
+                app.selectbox[0].set_value(4)
+                next(
+                    button for button in app.button if button.label == "Continue"
+                ).click().run()
+
+                self.assertFalse(app.exception)
+                self.assertEqual(app.session_state.selected_round, 4)
+                self.assertFalse(
+                    any(button.label == "Unlock round" for button in app.button)
+                )
+
     def test_team_timer_persists_and_finishes_only_once(self):
         with tempfile.TemporaryDirectory() as directory:
             with patch("app.ASSIGNMENT_DB_PATH", Path(directory) / "timers.sqlite3"):
@@ -266,14 +408,21 @@ class CoordinateLookupTests(unittest.TestCase):
 
     def test_round_entry_requires_previous_round_code(self):
         with tempfile.TemporaryDirectory() as directory:
-            with patch("app.ASSIGNMENT_DB_PATH", Path(directory) / "round-codes.sqlite3"):
+            with (
+                patch("app.ASSIGNMENT_DB_PATH", Path(directory) / "round-codes.sqlite3"),
+                patch(
+                    "app.load_config",
+                    return_value={"places": [{"entry_code": "PHYSICAL-CODE"}]},
+                ),
+            ):
                 start_team_round_timer("Team 1", 1)
-                finish_team_round_timer("Team 1", 1)
+                get_or_assign_place("Team 1", 1)
+                finish_team_round_timer(
+                    "Team 1", 1, unlock_code="PHYSICAL-CODE"
+                )
                 code = get_round_unlock_code("Team 1", 2)
 
-                self.assertIsNotNone(code)
-                if code is None:
-                    self.fail("Round 1 should issue a Round 2 entry code.")
+                self.assertEqual(code, "PHYSICAL-CODE")
                 self.assertEqual(get_round_unlock_code("Team 1", 2), code)
                 self.assertFalse(round_unlock_was_entered("Team 1", 2))
                 self.assertFalse(submit_round_unlock_code("Team 1", 2, "wrong"))
@@ -285,9 +434,16 @@ class CoordinateLookupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with patch("app.ASSIGNMENT_DB_PATH", Path(directory) / "round-codes.sqlite3"):
                 start_team_round_timer("Team 1", 2)
+                finish_team_round_timer("Team 1", 2)
+                stale_code = get_round_unlock_code("Team 1", 3)
+                if stale_code is None:
+                    self.fail("Round 2 should persist a code for Round 3.")
+                self.assertNotEqual(stale_code, "CODE-3")
+                self.assertTrue(submit_round_unlock_code("Team 1", 3, stale_code))
                 finish_team_round_timer("Team 1", 2, unlock_code="CODE-3")
 
                 self.assertEqual(get_round_unlock_code("Team 1", 3), "CODE-3")
+                self.assertFalse(round_unlock_was_entered("Team 1", 3))
                 reset_team_games(["Team 1"], from_round=2)
                 start_team_round_timer("Team 1", 2)
                 finish_team_round_timer("Team 1", 2)
@@ -417,6 +573,46 @@ class CoordinateLookupTests(unittest.TestCase):
         self.assertEqual(after_solve["penalty_seconds"], 120)
         self.assertEqual(persisted_penalty, 120)
         self.assertEqual(next_image_wrong["penalty_seconds"], 120)
+
+    def test_solved_visual_puzzle_code_segment_is_rendered_as_an_image(self):
+        solved_segment = "0000000000000003"
+        segment_image = object()
+        puzzles = [
+            {
+                "Position": position,
+                "Image": f"puzzle image {position}",
+                "Correct answer": f"Answer {position}",
+                "Code segment": solved_segment if position == 1 else f"{position:016d}",
+            }
+            for position in range(1, 5)
+        ]
+        progress = {
+            "puzzle_positions": [1, 2, 3, 4],
+            "current_position": 2,
+            "completed": False,
+            "wrong_attempts": 0,
+            "penalty_seconds": 0,
+        }
+        streamlit = MagicMock()
+
+        with (
+            patch(
+                "app.load_config",
+                return_value={
+                    "round_penalties": {
+                        "4": {"free_attempts": 3, "penalty_seconds": 120}
+                    }
+                },
+            ),
+            patch("app.load_visual_puzzle_content", return_value=puzzles),
+            patch("app.get_visual_puzzle_progress", return_value=progress),
+            patch("app.create_riddle_image", return_value=segment_image) as image_factory,
+        ):
+            render_visual_puzzle(streamlit, "Team 1", [1, 2, 3, 4], 0)
+
+        image_factory.assert_called_once_with(f"Code segment: {solved_segment}")
+        streamlit.image.assert_any_call(segment_image, use_container_width=True)
+        streamlit.success.assert_called_once_with("Puzzle 1 solved.")
 
     def test_visual_puzzle_uses_configured_free_attempts_and_penalty(self):
         image_buffer = BytesIO()
@@ -597,6 +793,61 @@ class CoordinateLookupTests(unittest.TestCase):
                 )
 
         self.assertEqual(penalty, 75)
+
+    def test_round_five_completion_shows_continue_button_to_round_six(self):
+        image_buffer = BytesIO()
+        Image.new("RGB", (2, 2), "green").save(image_buffer, format="PNG")
+        image_data = image_buffer.getvalue()
+        photographs = [
+            {"Image": image_data, "Code": f"CODE-{position}"}
+            for position in range(1, 16)
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                patch(
+                    "app.ASSIGNMENT_DB_PATH",
+                    Path(directory) / "hidden_photographs.sqlite3",
+                ),
+                patch("app.render_team_timer"),
+                patch("app.random.choice", side_effect=lambda positions: positions[0]),
+                patch.dict(os.environ, {"environment": "LOCAL"}),
+            ):
+                save_hidden_photograph_content(photographs)
+                start_team_timer("Team 1")
+                start_team_round_timer("Team 1", 5)
+                submit_hidden_photograph("Team 1", image_data)
+                review_hidden_photograph_submission("Team 1", is_correct=True)
+
+                app = AppTest.from_string("from app import main\nmain()", default_timeout=15)
+                app.session_state.screen = "lookup"
+                app.session_state.selected_team = "Team 1"
+                app.session_state.selected_round = 5
+                app.session_state.admin_authenticated = True
+                app.run()
+
+                self.assertFalse(app.exception)
+                self.assertEqual(
+                    get_round_unlock_code("Team 1", 6), "CODE-1"
+                )
+                self.assertTrue(
+                    any(
+                        button.label == "Continue to Round 6"
+                        for button in app.button
+                    )
+                )
+                next(
+                    button
+                    for button in app.button
+                    if button.label == "Continue to Round 6"
+                ).click().run()
+
+                self.assertFalse(app.exception)
+                self.assertEqual(app.session_state.selected_round, 6)
+                self.assertTrue(
+                    any(
+                        "Final Case" in heading.value for heading in app.subheader
+                    )
+                )
 
     def test_hidden_photographs_require_at_least_fifteen_complete_entries(self):
         image_buffer = BytesIO()
@@ -969,11 +1220,84 @@ class CoordinateLookupTests(unittest.TestCase):
         self.assertEqual(correct_result, (True, "CODE-1"))
         self.assertEqual(incorrect_result, (False, None))
 
+    def test_round_two_uses_configured_free_attempts_and_penalties_per_set(self):
+        statements = [
+            {
+                "Statement": f"Hotel fact {index}",
+                "Correct answer": "True" if index % 2 else "False",
+            }
+            for index in range(1, 21)
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                patch("app.ASSIGNMENT_DB_PATH", Path(directory) / "hotel.sqlite3"),
+                patch(
+                    "app.load_config",
+                    return_value={
+                        "round_penalties": {
+                            "2": {"free_attempts": 1, "penalty_seconds": 45}
+                        }
+                    },
+                ),
+            ):
+                save_hotel_detective_content(statements, ["CODE-1", "", "", ""])
+                first_wrong = submit_hotel_detective_answers(
+                    "Team 1", 1, [False] * 5
+                )
+                second_wrong = submit_hotel_detective_answers(
+                    "Team 1", 1, [False] * 5
+                )
+                third_wrong = submit_hotel_detective_answers(
+                    "Team 1", 1, [False] * 5
+                )
+                correct = submit_hotel_detective_answers(
+                    "Team 1", 1, [index % 2 == 1 for index in range(1, 6)]
+                )
+                progress = get_hotel_detective_progress("Team 1", 1)
+                total_penalty = get_team_penalty_seconds("Team 1")
+                admin_timing = get_admin_team_timing(["Team 1"], [2])
+                reset_team_games(["Team 1"], from_round=2)
+                reset_progress = get_hotel_detective_progress("Team 1", 1)
+
+        self.assertEqual(first_wrong["added_penalty"], 0)
+        self.assertEqual(second_wrong["added_penalty"], 45)
+        self.assertEqual(third_wrong["added_penalty"], 45)
+        self.assertEqual(correct["unlock_code"], "CODE-1")
+        self.assertEqual(progress, {"wrong_attempts": 3, "penalty_seconds": 90})
+        self.assertEqual(total_penalty, 90)
+        self.assertEqual(admin_timing[0]["penalty_seconds"], 90)
+        self.assertEqual(reset_progress, {"wrong_attempts": 0, "penalty_seconds": 0})
+
+    def test_hotel_detective_set_assignment_is_random_and_stable_per_team(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                patch("app.ASSIGNMENT_DB_PATH", Path(directory) / "hotel.sqlite3"),
+                patch("app.random.choice", side_effect=[3, 1]) as choose_set,
+            ):
+                first_assignment = get_or_assign_hotel_detective_set(
+                    "Team 1", [1, 2, 3, 4]
+                )
+                repeated_assignment = get_or_assign_hotel_detective_set(
+                    "Team 1", [1, 2, 3, 4]
+                )
+                second_team_assignment = get_or_assign_hotel_detective_set(
+                    "Team 2", [1, 2, 3, 4]
+                )
+
+        self.assertEqual(first_assignment, 3)
+        self.assertEqual(repeated_assignment, 3)
+        self.assertEqual(second_team_assignment, 1)
+        self.assertEqual(choose_set.call_count, 2)
+
     def test_round_two_shows_hotel_statements_after_round_one(self):
         with tempfile.TemporaryDirectory() as directory:
+            config = load_config()
+            config["places"][0]["entry_code"] = "ROUND2-ENTRY"
             with (
                 patch("app.ASSIGNMENT_DB_PATH", Path(directory) / "game.sqlite3"),
                 patch("app.render_team_timer"),
+                patch("app.load_config", return_value=config),
+                patch("app.random.choice", side_effect=lambda choices: choices[0]),
             ):
                 save_hotel_detective_content(
                     [
@@ -983,8 +1307,11 @@ class CoordinateLookupTests(unittest.TestCase):
                     ["CODE-1", "CODE-2", "CODE-3", "CODE-4"],
                 )
                 start_team_timer("Team 1")
+                get_or_assign_place("Team 1", 1)
                 start_team_round_timer("Team 1", 1)
-                finish_team_round_timer("Team 1", 1)
+                finish_team_round_timer(
+                    "Team 1", 1, unlock_code="ROUND2-ENTRY"
+                )
                 app = AppTest.from_string("from app import main\nmain()", default_timeout=15)
                 app.session_state.screen = "round"
                 app.session_state.selected_team = "Team 1"
@@ -1000,9 +1327,17 @@ class CoordinateLookupTests(unittest.TestCase):
                 app.button[0].click().run()
                 self.assertEqual(len(app.number_input), 2)
 
-                app.button[0].click().run()
-                app.selectbox[0].set_value(2)
-                app.button[0].click().run()
+                next(
+                    button
+                    for button in app.button
+                    if button.label == "Continue to Round 2"
+                ).click().run()
+                self.assertTrue(
+                    any(
+                        widget.label.startswith("Enter the code from Round 1")
+                        for widget in app.text_input
+                    )
+                )
 
                 self.assertFalse(app.exception)
                 self.assertTrue(
@@ -1024,9 +1359,7 @@ class CoordinateLookupTests(unittest.TestCase):
                     connection.close()
                 self.assertIsNone(round_two_timer)
                 round_two_code = get_round_unlock_code("Team 1", 2)
-                self.assertIsNotNone(round_two_code)
-                if round_two_code is None:
-                    self.fail("Round 1 should issue a Round 2 entry code.")
+                self.assertEqual(round_two_code, "ROUND2-ENTRY")
                 app.text_input[0].set_value(round_two_code)
                 next(
                     button
@@ -1052,7 +1385,112 @@ class CoordinateLookupTests(unittest.TestCase):
                 )
                 self.assertTrue(any("Hotel fact 1" in text.value for text in app.markdown))
                 self.assertEqual(len(app.number_input), 0)
-                self.assertEqual(app.selectbox[0].label, "Statement set")
+                self.assertFalse(
+                    any(widget.label == "Statement set" for widget in app.selectbox)
+                )
+                self.assertTrue(
+                    any(
+                        "Assigned statement set: Set 1" in caption.value
+                        for caption in app.caption
+                    )
+                )
+                for answer_widget in app.selectbox:
+                    answer_widget.set_value("True")
+                next(
+                    button
+                    for button in app.button
+                    if button.label == "Check answers"
+                ).click().run()
+
+                self.assertFalse(app.exception)
+                next_round_code_messages = [
+                    message.value
+                    for message in app.success
+                    if "Code to enter in Round 3:" in message.value
+                ]
+                self.assertEqual(len(next_round_code_messages), 1)
+                self.assertIn("CODE-1", next_round_code_messages[0])
+                next(
+                    button
+                    for button in app.button
+                    if button.label == "Continue to Round 3"
+                ).click().run()
+
+                self.assertFalse(app.exception)
+                self.assertEqual(app.session_state.selected_round, 3)
+                self.assertTrue(
+                    any(
+                        widget.label.startswith("Enter the code from Round 2")
+                        for widget in app.text_input
+                    )
+                )
+
+    def test_round_one_shows_room_without_revealing_admin_code(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = load_config()
+            config["places"][0]["entry_code"] = "AT-ROOM-42"
+            with (
+                patch("app.ASSIGNMENT_DB_PATH", Path(directory) / "game.sqlite3"),
+                patch("app.render_team_timer"),
+                patch("app.load_config", return_value=config),
+                patch("app.random.choice", side_effect=lambda choices: choices[0]),
+            ):
+                start_team_timer("Team 1")
+                get_or_assign_place("Team 1", 1)
+                start_team_round_timer("Team 1", 1)
+                app = AppTest.from_string("from app import main\nmain()", default_timeout=15)
+                app.session_state.screen = "lookup"
+                app.session_state.selected_team = "Team 1"
+                app.session_state.selected_round = 1
+                app.session_state.assigned_place_index = 0
+                app.session_state.assignment_revision = config.get(
+                    "config_revision", 0
+                )
+                app.run()
+
+                app.number_input[0].set_value(27.1751)
+                app.number_input[1].set_value(78.0421)
+                next(
+                    button for button in app.button if button.label == "Find room"
+                ).click().run()
+
+                self.assertFalse(app.exception)
+                self.assertTrue(
+                    any("Room 1" in message.value for message in app.success)
+                )
+                self.assertFalse(
+                    any("AT-ROOM-42" in message.value for message in app.success)
+                )
+                self.assertEqual(
+                    get_round_unlock_code("Team 1", 2), "AT-ROOM-42"
+                )
+                self.assertIn(
+                    "Continue to Round 2",
+                    [button.label for button in app.button],
+                    f"screen={app.session_state.screen}, "
+                    f"successes={[message.value for message in app.success]}, "
+                    f"errors={[message.value for message in app.error]}",
+                )
+                next(
+                    button
+                    for button in app.button
+                    if button.label == "Continue to Round 2"
+                ).click().run()
+
+                self.assertFalse(app.exception)
+                self.assertEqual(
+                    app.session_state.selected_round,
+                    2,
+                    f"screen={app.session_state.screen}, "
+                    f"buttons={[button.label for button in app.button]}, "
+                    f"text_inputs={[widget.label for widget in app.text_input]}",
+                )
+                self.assertTrue(
+                    any(
+                        widget.label.startswith("Enter the code from Round 1")
+                        for widget in app.text_input
+                    )
+                )
 
     def test_hotel_detective_rejects_answerless_statement_and_unconfigured_set(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1078,7 +1516,7 @@ class CoordinateLookupTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "not ready"):
                     check_hotel_detective_answers(1, [True] * 5)
 
-    def test_whitepaper_questions_persist_and_reveal_code_only_for_correct_answer(self):
+    def test_whitepaper_sets_persist_and_reveal_one_code_when_all_answers_are_correct(self):
         with tempfile.TemporaryDirectory() as directory:
             with patch("app.ASSIGNMENT_DB_PATH", Path(directory) / "whitepaper.sqlite3"):
                 questions = [
@@ -1087,55 +1525,139 @@ class CoordinateLookupTests(unittest.TestCase):
                         "Correct answer": (
                             "Café answer" if index == 1 else f"Correct answer {index}"
                         ),
-                        "Unlock code": f"CODE-{index}",
                     }
-                    for index in range(1, 21)
+                    for index in range(1, 17)
                 ]
-                save_whitepaper_questions(questions)
+                codes = [f"SET-CODE-{set_number}" for set_number in range(1, 5)]
+                save_whitepaper_content(questions, codes)
 
-                loaded_questions = load_whitepaper_questions()
-                correct_result = check_whitepaper_answer(1, " CAFÉ   answer ")
-                incorrect_result = check_whitepaper_answer(1, "wrong answer")
+                loaded_questions, loaded_codes = load_whitepaper_content()
+                correct_answers = [
+                    " CAFÉ   answer ",
+                    "Correct answer 2",
+                    "Correct answer 3",
+                    "Correct answer 4",
+                ]
+                correct_result = check_whitepaper_set_answers(1, correct_answers)
+                incorrect_result = check_whitepaper_set_answers(
+                    1,
+                    ["wrong answer", *correct_answers[1:]],
+                )
 
-        self.assertEqual(len(loaded_questions), 20)
+        self.assertEqual(len(loaded_questions), 16)
         self.assertEqual(loaded_questions[0], questions[0])
-        self.assertEqual(correct_result, (True, "CODE-1"))
+        self.assertEqual(loaded_codes, codes)
+        self.assertEqual(correct_result, (True, "SET-CODE-1"))
         self.assertEqual(incorrect_result, (False, None))
 
-    def test_whitepaper_questions_reject_incomplete_entries_and_unconfigured_questions(self):
+    def test_whitepaper_sets_reject_incomplete_questions_and_missing_codes(self):
         with tempfile.TemporaryDirectory() as directory:
             with patch("app.ASSIGNMENT_DB_PATH", Path(directory) / "whitepaper.sqlite3"):
                 with self.assertRaisesRegex(ValueError, "needs a question"):
-                    save_whitepaper_questions(
+                    save_whitepaper_content(
                         [
                             {
                                 "Question": "A question",
                                 "Correct answer": "An answer",
-                                "Unlock code": "",
                             }
                         ]
                         + [
                             {
                                 "Question": "",
                                 "Correct answer": "",
-                                "Unlock code": "",
                             }
                         ]
-                        * 19
+                        * 15,
+                        ["SET-1", "SET-2", "SET-3", "SET-4"],
                     )
 
-                save_whitepaper_questions(
+                complete_questions = [
+                    {
+                        "Question": f"Question {position}",
+                        "Correct answer": f"Answer {position}",
+                    }
+                    for position in range(1, 17)
+                ]
+                with self.assertRaisesRegex(ValueError, "Set 1 needs an unlock code"):
+                    save_whitepaper_content(
+                        complete_questions, ["", "SET-2", "SET-3", "SET-4"]
+                    )
+
+                with self.assertRaisesRegex(ValueError, "not ready"):
+                    check_whitepaper_set_answers(
+                        1, ["Answer 1", "Answer 2", "Answer 3", "Answer 4"]
+                    )
+
+    def test_round_three_displays_four_questions_for_selected_set(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("app.ASSIGNMENT_DB_PATH", Path(directory) / "whitepaper.sqlite3"):
+                save_whitepaper_content(
                     [
                         {
-                            "Question": "",
-                            "Correct answer": "",
-                            "Unlock code": "",
+                            "Question": f"Whitepaper question {position}",
+                            "Correct answer": f"Answer {position}",
                         }
-                    ]
-                    * 20
+                        for position in range(1, 17)
+                    ],
+                    ["SET-1", "SET-2", "SET-3", "SET-4"],
                 )
-                with self.assertRaisesRegex(ValueError, "not ready"):
-                    check_whitepaper_answer(1, "anything")
+                app = AppTest.from_string(
+                    """
+import streamlit as st
+from app import render_whitepaper_search
+render_whitepaper_search(st, 3, [1, 2, 3, 4, 5, 6])
+"""
+                )
+                app.run()
+
+                self.assertFalse(app.exception)
+                self.assertEqual(len(app.text_input), 4)
+                self.assertTrue(
+                    all(
+                        any(f"Whitepaper question {position}" in item.value for item in app.markdown)
+                        for position in range(1, 5)
+                    )
+                )
+                app.selectbox[0].set_value(2).run()
+
+                self.assertFalse(app.exception)
+                self.assertEqual(len(app.text_input), 4)
+                self.assertTrue(
+                    all(
+                        any(f"Whitepaper question {position}" in item.value for item in app.markdown)
+                        for position in range(5, 9)
+                    )
+                )
+
+    def test_whitepaper_legacy_codes_migrate_to_four_question_sets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("app.ASSIGNMENT_DB_PATH", Path(directory) / "whitepaper.sqlite3"):
+                connection = sqlite3.connect(Path(directory) / "whitepaper.sqlite3")
+                try:
+                    create_database_tables(connection)
+                    connection.executemany(
+                        """
+                        INSERT INTO whitepaper_questions (position, question, answer, code)
+                        VALUES (?, ?, ?, ?)
+                        """,
+                        [
+                            (
+                                position,
+                                f"Question {position}",
+                                f"Answer {position}",
+                                f"OLD-{position}",
+                            )
+                            for position in range(1, 21)
+                        ],
+                    )
+                    connection.commit()
+                finally:
+                    connection.close()
+
+                questions, codes = load_whitepaper_content()
+
+        self.assertEqual(len(questions), 16)
+        self.assertEqual(codes, ["OLD-1", "OLD-5", "OLD-9", "OLD-13"])
 
     def test_elapsed_time_uses_hours_minutes_and_seconds(self):
         self.assertEqual(format_elapsed_time(3661), "01:01:01")
