@@ -216,6 +216,26 @@ def create_database_tables(connection: sqlite3.Connection) -> None:
     )
     connection.execute(
         """
+        CREATE TABLE IF NOT EXISTS timer_freezes (
+            team TEXT,
+            round_number INTEGER,
+            started_at REAL NOT NULL,
+            finished_at REAL,
+            CHECK ((team IS NULL AND round_number IS NULL) OR
+                   (team IS NOT NULL AND round_number IS NOT NULL))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS team_reset_revisions (
+            team TEXT PRIMARY KEY,
+            revision INTEGER NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
         CREATE TABLE IF NOT EXISTS hotel_statements (
             position INTEGER PRIMARY KEY,
             statement TEXT NOT NULL,
@@ -1650,60 +1670,73 @@ def get_team_timer(team: str) -> Optional[tuple[float, Optional[float]]]:
     return timer
 
 
-def get_browser_login_id(st: Any) -> str:
-    browser_cookie = st.context.cookies.get("_streamlit_xsrf")
-    if not browser_cookie:
-        raise ValueError(
-            "Your browser session could not be identified. Enable cookies and reload."
-        )
-    return hashlib.sha256(browser_cookie.encode("utf-8")).hexdigest()
-
-
-def get_team_logins() -> dict[str, str]:
+def get_team_reset_revision(team: str) -> int:
     with closing(sqlite3.connect(ASSIGNMENT_DB_PATH, timeout=30)) as connection, connection:
         create_database_tables(connection)
-        rows = connection.execute(
-            "SELECT team, browser_id FROM team_logins"
-        ).fetchall()
-    return dict(rows)
+        row = connection.execute(
+            "SELECT revision FROM team_reset_revisions WHERE team = ?", (team,)
+        ).fetchone()
+    return row[0] if row is not None else 0
 
 
-def claim_team_login(team: str, browser_id: str) -> None:
+def reset_team_games(teams: list[str], from_round: int = 1) -> None:
+    if not teams or any(not team for team in teams) or from_round not in ROUND_NUMBERS:
+        raise ValueError("Select valid teams and a round to reset.")
     with closing(sqlite3.connect(ASSIGNMENT_DB_PATH, timeout=30)) as connection, connection:
         connection.execute("BEGIN IMMEDIATE")
         create_database_tables(connection)
-        browser_login = connection.execute(
-            "SELECT team FROM team_logins WHERE browser_id = ?",
-            (browser_id,),
-        ).fetchone()
-        if browser_login is not None:
-            if browser_login[0] != team:
-                raise ValueError(
-                    f"This browser is already logged in as {browser_login[0]} "
-                    "and cannot switch teams."
+        for team in set(teams):
+            connection.execute("DELETE FROM team_timers WHERE team = ?", (team,))
+            connection.execute(
+                "DELETE FROM team_round_timers WHERE team = ? AND round_number >= ?",
+                (team, from_round),
+            )
+            if from_round <= 4:
+                connection.execute(
+                    """
+                    UPDATE visual_puzzle_progress
+                    SET current_position = 1, wrong_attempts = 0,
+                        penalty_seconds = 0, completed = 0
+                    WHERE team = ?
+                    """,
+                    (team,),
                 )
-            return
+            if from_round <= 5:
+                connection.execute(
+                    "DELETE FROM hidden_photograph_submissions WHERE team = ?", (team,)
+                )
+            if from_round <= 6:
+                connection.execute(
+                    "DELETE FROM murder_mystery_progress WHERE team = ?", (team,)
+                )
+            connection.execute(
+                """
+                INSERT INTO team_reset_revisions (team, revision) VALUES (?, 1)
+                ON CONFLICT(team) DO UPDATE SET revision = revision + 1
+                """,
+                (team,),
+            )
 
-        team_login = connection.execute(
-            "SELECT browser_id FROM team_logins WHERE team = ?",
-            (team,),
-        ).fetchone()
-        if team_login is not None:
-            raise ValueError(f"{team} is already logged in on another browser.")
 
-        connection.execute(
-            """
-            INSERT INTO team_logins (team, browser_id, logged_in_at)
-            VALUES (?, ?, ?)
-            """,
-            (team, browser_id, time.time()),
-        )
-
-
-def release_team_login(team: str) -> None:
+def get_unlocked_rounds(team: str, rounds: list[int]) -> list[int]:
     with closing(sqlite3.connect(ASSIGNMENT_DB_PATH, timeout=30)) as connection, connection:
         create_database_tables(connection)
-        connection.execute("DELETE FROM team_logins WHERE team = ?", (team,))
+        finished = {
+            row[0]
+            for row in connection.execute(
+                """
+                SELECT round_number FROM team_round_timers
+                WHERE team = ? AND finished_at IS NOT NULL
+                """,
+                (team,),
+            )
+        }
+    unlocked = []
+    for round_number in sorted(rounds):
+        unlocked.append(round_number)
+        if round_number not in finished:
+            break
+    return unlocked
 
 
 def start_team_timer(team: str) -> tuple[float, Optional[float]]:
@@ -1792,6 +1825,66 @@ def finish_team_round_timer(
     return timer
 
 
+def set_timer_freeze(
+    frozen: bool, team: Optional[str] = None, round_number: Optional[int] = None
+) -> None:
+    if (team is None) != (round_number is None):
+        raise ValueError("Specify both a team and a round, or neither.")
+    if team is not None and (not team or round_number not in ROUND_NUMBERS):
+        raise ValueError("A valid team and round are required.")
+    with closing(sqlite3.connect(ASSIGNMENT_DB_PATH, timeout=30)) as connection, connection:
+        connection.execute("BEGIN IMMEDIATE")
+        create_database_tables(connection)
+        active = connection.execute(
+            """
+            SELECT 1 FROM timer_freezes
+            WHERE team IS ? AND round_number IS ? AND finished_at IS NULL
+            """,
+            (team, round_number),
+        ).fetchone()
+        if frozen and active is None:
+            connection.execute(
+                "INSERT INTO timer_freezes (team, round_number, started_at) VALUES (?, ?, ?)",
+                (team, round_number, time.time()),
+            )
+        elif not frozen and active is not None:
+            connection.execute(
+                """
+                UPDATE timer_freezes SET finished_at = ?
+                WHERE team IS ? AND round_number IS ? AND finished_at IS NULL
+                """,
+                (time.time(), team, round_number),
+            )
+
+
+def get_active_timer_freezes() -> tuple[bool, set[tuple[str, int]]]:
+    with closing(sqlite3.connect(ASSIGNMENT_DB_PATH, timeout=30)) as connection, connection:
+        create_database_tables(connection)
+        freezes = connection.execute(
+            "SELECT team, round_number FROM timer_freezes WHERE finished_at IS NULL"
+        ).fetchall()
+    return (
+        any(team is None for team, _ in freezes),
+        {(team, number) for team, number in freezes if team is not None},
+    )
+
+
+def elapsed_without_freezes(
+    started_at: float, ended_at: float, freezes: list[tuple[float, float]]
+) -> float:
+    intervals = sorted(
+        (max(started_at, start), min(ended_at, end))
+        for start, end in freezes
+        if start < end and start < ended_at and end > started_at
+    )
+    frozen_seconds = 0.0
+    last_end = started_at
+    for start, end in intervals:
+        frozen_seconds += max(0, end - max(start, last_end))
+        last_end = max(last_end, end)
+    return max(0, ended_at - started_at - frozen_seconds)
+
+
 def get_admin_team_timing(
     teams: list[str], rounds: list[int]
 ) -> list[dict[str, Any]]:
@@ -1812,6 +1905,9 @@ def get_admin_team_timing(
                 """
             )
         }
+        freezes = connection.execute(
+            "SELECT team, round_number, started_at, finished_at FROM timer_freezes"
+        ).fetchall()
         penalties = {
             row[0]: row[1]
             for row in connection.execute(
@@ -1835,12 +1931,33 @@ def get_admin_team_timing(
                 penalties[team] = penalties.get(team, 0) + penalty_seconds
 
     now = time.time()
+    master_freezes = [
+        (start, end if end is not None else now)
+        for team, _, start, end in freezes if team is None
+    ]
+    round_freezes: dict[tuple[str, int], list[tuple[float, float]]] = {}
+    for team, number, start, end in freezes:
+        if team is not None:
+            round_freezes.setdefault((team, number), []).append(
+                (start, end if end is not None else now)
+            )
     summaries = []
     for team in teams:
         timer = team_timers.get(team)
         finished_at = timer[1] if timer is not None else None
+        team_freezes = list(master_freezes)
+        for (freeze_team, number), intervals in round_freezes.items():
+            round_timer = round_timers.get((freeze_team, number))
+            if freeze_team == team and round_timer is not None:
+                round_end = round_timer[1] if round_timer[1] is not None else now
+                team_freezes.extend(
+                    (max(start, round_timer[0]), min(end, round_end))
+                    for start, end in intervals
+                )
         elapsed_seconds = (
-            max(0, (finished_at or now) - timer[0]) if timer is not None else None
+            elapsed_without_freezes(
+                timer[0], finished_at if finished_at is not None else now, team_freezes
+            ) if timer is not None else None
         )
         penalty_seconds = penalties.get(team, 0)
         round_summaries = []
@@ -1854,7 +1971,11 @@ def get_admin_team_timing(
                 round_end = round_finished_at
                 if round_end is None:
                     round_end = min(now, finished_at) if finished_at is not None else now
-                round_elapsed_seconds = max(0, round_end - round_timer[0])
+                round_elapsed_seconds = elapsed_without_freezes(
+                    round_timer[0],
+                    round_end,
+                    master_freezes + round_freezes.get((team, round_number), []),
+                )
                 round_completed = round_finished_at is not None
             round_summaries.append(
                 {
@@ -1890,17 +2011,27 @@ def format_elapsed_time(seconds: float) -> str:
 def render_team_timer(st: Any, team: str) -> None:
     @st.fragment(run_every="1s")
     def timer_display() -> None:
-        timer = get_team_timer(team)
-        if timer is None:
+        if (
+            "team_reset_revision" in st.session_state
+            and st.session_state.team_reset_revision != get_team_reset_revision(team)
+        ):
+            st.rerun()
+        summary = get_admin_team_timing([team], ROUND_NUMBERS)[0]
+        elapsed = summary["adjusted_seconds"]
+        if elapsed is None:
             return
-        started_at, finished_at = timer
-        penalty_seconds = get_team_penalty_seconds(team)
-        elapsed = (
-            (finished_at or time.time()) - started_at
-            + penalty_seconds
-        )
-        label = "Final time" if finished_at is not None else "Time elapsed"
+        penalty_seconds = summary["penalty_seconds"]
+        label = "Final time" if summary["finished"] else "Time elapsed"
         st.metric(label, format_elapsed_time(elapsed))
+        master_frozen, frozen_rounds = get_active_timer_freezes()
+        if not summary["finished"] and (
+            master_frozen or any(
+                (team, item["round_number"]) in frozen_rounds
+                and item["elapsed_seconds"] is not None and not item["completed"]
+                for item in summary["rounds"]
+            )
+        ):
+            st.caption("Timer frozen by an admin.")
         if penalty_seconds:
             st.caption(
                 f"Penalties added: {format_elapsed_time(penalty_seconds)}"
@@ -2894,6 +3025,10 @@ def render_hidden_photograph(st: Any, team: str) -> None:
     )
     st.image(state["reference_image"], use_container_width=True)
     if state["code"] is not None:
+        try:
+            finish_team_round_timer(team, 5)
+        except (ValueError, sqlite3.Error) as error:
+            st.error(f"Could not save Round 5 time: {error}")
         st.success(f"Your next code: {state['code']}")
 
     if state["reviewed"]:
@@ -3164,12 +3299,52 @@ def render_admin(st: Any, config: dict[str, Any]) -> None:
             "Adjusted total includes penalties."
         )
         try:
+            master_frozen, frozen_rounds = get_active_timer_freezes()
             team_summaries = get_admin_team_timing(
                 config["teams"], ROUND_NUMBERS
             )
         except sqlite3.Error as error:
             st.error(f"Could not load team times: {error}")
             return
+
+        st.markdown("**Timer freeze controls**")
+        st.caption(
+            "An individual freeze pauses the selected round and its team's total "
+            "while that round is active. The master freeze pauses all team and round timers."
+        )
+        master_label = "Resume all timers" if master_frozen else "Freeze all timers"
+        if st.button(master_label, key="master_timer_freeze"):
+            try:
+                set_timer_freeze(not master_frozen)
+            except sqlite3.Error as error:
+                st.error(f"Could not change master freeze: {error}")
+            else:
+                st.rerun()
+        st.caption(
+            "Master freeze is active." if master_frozen
+            else "Master freeze is inactive. Individual freezes remain in effect."
+        )
+        team_column, round_column, action_column = st.columns(
+            3, vertical_alignment="bottom"
+        )
+        with team_column:
+            selected_team = st.selectbox("Freeze team", config["teams"])
+        with round_column:
+            selected_round = st.selectbox(
+                "Freeze round", ROUND_NUMBERS, format_func=round_title
+            )
+        individually_frozen = (selected_team, selected_round) in frozen_rounds
+        with action_column:
+            freeze_label = "Resume selected round" if individually_frozen else "Freeze selected round"
+            if st.button(freeze_label, key="individual_timer_freeze"):
+                try:
+                    set_timer_freeze(not individually_frozen, selected_team, selected_round)
+                except (sqlite3.Error, ValueError) as error:
+                    st.error(f"Could not change round freeze: {error}")
+                else:
+                    st.rerun()
+        if individually_frozen:
+            st.caption("The selected round is individually frozen.")
 
         started_count = sum(
             summary["elapsed_seconds"] is not None for summary in team_summaries
@@ -3206,7 +3381,10 @@ def render_admin(st: Any, config: dict[str, Any]) -> None:
                 else:
                     row[label] = format_elapsed_time(round_elapsed)
                     if not round_summary["completed"]:
-                        row[label] += " (in progress)"
+                        frozen = master_frozen or (
+                            summary["team"], round_summary["round_number"]
+                        ) in frozen_rounds
+                        row[label] += " (frozen)" if frozen else " (in progress)"
             row["Penalties"] = format_elapsed_time(summary["penalty_seconds"])
             adjusted = summary["adjusted_seconds"]
             row["Adjusted total"] = (
@@ -3242,6 +3420,40 @@ def render_admin(st: Any, config: dict[str, Any]) -> None:
             "successful completion, and adjusted totals include penalties."
         )
         render_team_timing_overview()
+        st.subheader("Reset game progress and time")
+        st.warning(
+            "A reset permanently clears progress and penalties in the selected scope. "
+            "For a round reset, that round and all later rounds are reset, and the "
+            "team's overall timer restarts. Earlier rounds, puzzle assignments, "
+            "and freeze settings are retained."
+        )
+        if "reset_success" in st.session_state:
+            st.success(st.session_state.pop("reset_success"))
+        with st.form("admin_reset_game"):
+            reset_scope = st.selectbox(
+                "Reset scope", ["Team and round", "Entire team", "All teams"]
+            )
+            reset_team = st.selectbox("Reset team", config["teams"])
+            reset_round = st.selectbox(
+                "Reset from round", ROUND_NUMBERS, format_func=round_title
+            )
+            confirmed = st.checkbox("I understand this reset cannot be undone")
+            reset_submitted = st.form_submit_button("Reset game")
+        if reset_submitted:
+            if not confirmed:
+                st.error("Confirm that you understand the reset cannot be undone.")
+            else:
+                teams = config["teams"] if reset_scope == "All teams" else [reset_team]
+                first_round = reset_round if reset_scope == "Team and round" else 1
+                try:
+                    reset_team_games(teams, first_round)
+                except (sqlite3.Error, ValueError) as error:
+                    st.error(f"Could not reset game progress: {error}")
+                else:
+                    st.session_state.reset_success = (
+                        "Reset complete. Teams must start their timers again."
+                    )
+                    st.rerun()
     elif admin_section == "Game settings":
         st.caption("Changes apply to all teams and reset current round assignments.")
         with st.form("admin_game_settings"):
@@ -3376,39 +3588,6 @@ def render_admin(st: Any, config: dict[str, Any]) -> None:
                 for row in editor_records(team_rows)
             ]
             save_admin_configuration(updated_config, ("admin_teams",))
-
-        st.subheader("Team logins")
-        st.caption(
-            "Each team is tied to one browser. Release a login only when a team "
-            "needs to move to a replacement browser or device."
-        )
-        try:
-            team_logins = get_team_logins()
-            logged_in_teams = [
-                team for team in config["teams"] if team in team_logins
-            ]
-            logged_in_teams.extend(
-                sorted(team for team in team_logins if team not in config["teams"])
-            )
-        except sqlite3.Error as error:
-            st.error(f"Could not load team logins: {error}")
-        else:
-            if not logged_in_teams:
-                st.info("No teams are logged in yet.")
-            else:
-                with st.form("admin_release_team_login"):
-                    team_to_release = st.selectbox(
-                        "Team login to release", logged_in_teams
-                    )
-                    release_submitted = st.form_submit_button("Release team login")
-                if release_submitted:
-                    try:
-                        release_team_login(team_to_release)
-                    except sqlite3.Error as error:
-                        st.error(f"Could not release the team login: {error}")
-                    else:
-                        st.success(f"{team_to_release}'s login was released.")
-                        st.rerun()
     elif admin_section == "Round 1: The Landmark Riddle - Places and coordinates":
         st.caption("Changes apply to all teams and reset current round assignments.")
         with st.form("admin_round_one_configuration"):
@@ -3587,69 +3766,25 @@ def main() -> None:
             "selected_round",
             "assigned_place_index",
             "rules_acknowledged",
+            "team_reset_revision",
         ):
             st.session_state.pop(key, None)
         st.session_state.pop("assignment_revision", None)
         st.session_state.screen = "team"
 
-    try:
-        browser_id = get_browser_login_id(st)
-        team_logins = get_team_logins()
-    except ValueError as error:
-        st.error(str(error))
-        return
-    except sqlite3.Error as error:
-        st.error(f"Could not load team logins: {error}")
-        return
-
-    browser_team = next(
-        (team for team, owner in team_logins.items() if owner == browser_id),
-        None,
-    )
-    if st.session_state.screen == "team" and browser_team is not None:
-        if browser_team not in config["teams"]:
-            st.error(
-                f"This browser is still assigned to {browser_team}, which is no "
-                "longer configured. Ask an admin to release that team login."
-            )
-            return
-        st.session_state.selected_team = browser_team
-        st.session_state.team_login_registered = True
-        timer = get_team_timer(browser_team)
-        st.session_state.screen = (
-            "instructions"
-            if timer is None
-            else "timer"
-            if timer[1] is not None
-            else "round"
-        )
-        st.rerun()
-
     if st.session_state.screen != "team" and "selected_team" in st.session_state:
-        selected_team = st.session_state.selected_team
-        if not st.session_state.get("team_login_registered", False):
-            try:
-                claim_team_login(selected_team, browser_id)
-            except (ValueError, sqlite3.Error) as error:
-                st.error(f"Could not restore this team's login: {error}")
-                return
-            st.session_state.team_login_registered = True
-            team_logins[selected_team] = browser_id
-        elif team_logins.get(selected_team) != browser_id:
-            st.error(
-                "This team's login is no longer active in this browser. "
-                "Ask an admin to release the login if you need to sign in again."
-            )
-            for key in (
-                "selected_team",
-                "selected_round",
-                "assigned_place_index",
-                "rules_acknowledged",
-                "team_login_registered",
-            ):
-                st.session_state.pop(key, None)
-            st.session_state.screen = "team"
+        try:
+            revision = get_team_reset_revision(st.session_state.selected_team)
+        except sqlite3.Error as error:
+            st.error(f"Could not check team reset status: {error}")
             return
+        if revision != st.session_state.get("team_reset_revision", 0):
+            for key in ("selected_round", "assigned_place_index", "assignment_revision"):
+                st.session_state.pop(key, None)
+            st.session_state.team_reset_revision = revision
+            st.session_state.rules_acknowledged = False
+            st.session_state.screen = "instructions"
+            st.info("An admin reset your game. Start your timer again to continue.")
 
     if st.session_state.screen in ("round", "lookup"):
         timer = get_team_timer(st.session_state.selected_team)
@@ -3682,36 +3817,19 @@ def main() -> None:
 
     if st.session_state.screen == "team":
         st.subheader("Select your team to log in")
-        st.caption(
-            "Use one browser for your team. This browser and team will stay linked "
-            "after login, so choose carefully. An admin can release the login if "
-            "your team needs to move to another device."
-        )
-        available_teams = [
-            team for team in config["teams"] if team not in team_logins
-        ]
-        if not available_teams:
-            st.info(
-                "All teams are already logged in. Ask an admin to release a team "
-                "login if your team needs access."
-            )
-        else:
-            with st.form("team_selection"):
-                selected_team = st.selectbox("Team", available_teams)
-                log_in = st.form_submit_button("Log in", type="primary")
-            if log_in:
-                try:
-                    claim_team_login(selected_team, browser_id)
-                except ValueError as error:
-                    st.error(str(error))
-                except sqlite3.Error as error:
-                    st.error(f"Could not log in to this team: {error}")
-                else:
-                    st.session_state.selected_team = selected_team
-                    st.session_state.team_login_registered = True
-                    st.session_state.rules_acknowledged = False
-                    st.session_state.screen = "instructions"
-                    st.rerun()
+        with st.form("team_selection"):
+            selected_team = st.selectbox("Team", config["teams"])
+            log_in = st.form_submit_button("Log in", type="primary")
+        if log_in:
+            st.session_state.selected_team = selected_team
+            try:
+                st.session_state.team_reset_revision = get_team_reset_revision(selected_team)
+            except sqlite3.Error as error:
+                st.error(f"Could not check team reset status: {error}")
+                return
+            st.session_state.rules_acknowledged = False
+            st.session_state.screen = "instructions"
+            st.rerun()
         return
 
     st.caption(f"Team: {st.session_state.selected_team}")
@@ -3782,10 +3900,21 @@ def main() -> None:
 
     if st.session_state.screen == "round":
         st.subheader("Select a round")
+        try:
+            unlocked_rounds = get_unlocked_rounds(
+                st.session_state.selected_team, ROUND_NUMBERS
+            )
+        except sqlite3.Error as error:
+            st.error(f"Could not load round progress: {error}")
+            return
+        st.caption(
+            "Complete each round to unlock the next. You can return to any "
+            "unlocked round."
+        )
         with st.form("round_selection"):
             selected_round = st.selectbox(
                 "Round",
-                ROUND_NUMBERS,
+                unlocked_rounds,
                 format_func=round_title,
             )
             continue_to_lookup = st.form_submit_button("Continue", type="primary")

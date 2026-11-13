@@ -13,7 +13,6 @@ from app import (
     create_riddle_image,
     check_hotel_detective_answers,
     check_whitepaper_answer,
-    claim_team_login,
     finish_team_timer,
     find_nearest_place,
     get_or_assign_place,
@@ -29,7 +28,7 @@ from app import (
     load_whitepaper_questions,
     load_visual_puzzle_content,
     get_team_timer,
-    get_team_logins,
+    get_unlocked_rounds,
     haversine_km,
     load_config,
     format_elapsed_time,
@@ -53,7 +52,6 @@ from app import (
     team_names_for_count,
     verify_admin_credentials,
     review_hidden_photograph_submission,
-    release_team_login,
 )
 from murder_mysteries import MURDER_MYSTERIES
 from sudoku_puzzles import DEFAULT_SUDOKU_PUZZLES
@@ -249,35 +247,18 @@ class CoordinateLookupTests(unittest.TestCase):
         self.assertEqual(still_finished, finished)
         self.assertEqual(persisted, finished)
 
-    def test_team_login_is_unique_per_team_and_browser(self):
+    def test_rounds_unlock_in_order(self):
         with tempfile.TemporaryDirectory() as directory:
-            with patch("app.ASSIGNMENT_DB_PATH", Path(directory) / "logins.sqlite3"):
-                claim_team_login("Team 1", "browser-1")
-                claim_team_login("Team 1", "browser-1")
-
-                with self.assertRaisesRegex(ValueError, "already logged in"):
-                    claim_team_login("Team 1", "browser-2")
-                with self.assertRaisesRegex(ValueError, "cannot switch teams"):
-                    claim_team_login("Team 2", "browser-1")
-
-                self.assertEqual(get_team_logins(), {"Team 1": "browser-1"})
-                release_team_login("Team 1")
-                claim_team_login("Team 2", "browser-1")
-
-                self.assertEqual(get_team_logins(), {"Team 2": "browser-1"})
-
-    def test_logged_in_team_is_hidden_from_other_browsers(self):
-        with tempfile.TemporaryDirectory() as directory:
-            with (
-                patch("app.ASSIGNMENT_DB_PATH", Path(directory) / "logins.sqlite3"),
-                patch("app.get_browser_login_id", return_value="browser-2"),
-            ):
-                claim_team_login("Team 1", "browser-1")
-                app = AppTest.from_string("from app import main\nmain()")
-                app.run()
-
-        self.assertNotIn("Team 1", app.selectbox[0].options)
-
+            with patch("app.ASSIGNMENT_DB_PATH", Path(directory) / "unlock.sqlite3"):
+                rounds = [1, 2, 3, 4, 5, 6]
+                self.assertEqual(get_unlocked_rounds("Team 1", rounds), [1])
+                start_team_round_timer("Team 1", 1)
+                finish_team_round_timer("Team 1", 1)
+                self.assertEqual(get_unlocked_rounds("Team 1", rounds), [1, 2])
+                for number in rounds[1:]:
+                    start_team_round_timer("Team 1", number)
+                    finish_team_round_timer("Team 1", number)
+                self.assertEqual(get_unlocked_rounds("Team 1", rounds), rounds)
     def test_team_round_timer_persists_and_finishes_only_once(self):
         with tempfile.TemporaryDirectory() as directory:
             with patch("app.ASSIGNMENT_DB_PATH", Path(directory) / "round-timers.sqlite3"):
@@ -959,7 +940,6 @@ class CoordinateLookupTests(unittest.TestCase):
             with (
                 patch("app.ASSIGNMENT_DB_PATH", Path(directory) / "game.sqlite3"),
                 patch("app.render_team_timer"),
-                patch("app.get_browser_login_id", return_value="test-browser"),
             ):
                 save_hotel_detective_content(
                     [
@@ -969,6 +949,8 @@ class CoordinateLookupTests(unittest.TestCase):
                     ["CODE-1", "CODE-2", "CODE-3", "CODE-4"],
                 )
                 start_team_timer("Team 1")
+                start_team_round_timer("Team 1", 1)
+                finish_team_round_timer("Team 1", 1)
                 app = AppTest.from_string("from app import main\nmain()", default_timeout=15)
                 app.session_state.screen = "round"
                 app.session_state.selected_team = "Team 1"

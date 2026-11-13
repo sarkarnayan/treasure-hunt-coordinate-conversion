@@ -22,10 +22,7 @@ statements at a time; all five must be correct to reveal that set's unlock code.
 A team's elapsed time is saved when they start and resumes across refreshes
 and screen changes. The timer starts only after the team acknowledges the
 global instructions.
-Refreshing or revisiting the app resumes the team's saved timer. Each team can
-log in from one browser, and a browser stays bound to its chosen team. Admins
-can release a team's login in **Admin → Teams** if it needs to move to another
-device.
+Refreshing or revisiting the app resumes the team's saved timer. Any browser can log in as any team. Rounds unlock in order: a team must complete a round to unlock the next, and can then freely return to any unlocked round.
 
 The supplied logo is displayed in the app header from `assets/inxiteout_logo.jpg`.
 
@@ -54,14 +51,28 @@ in the sidebar and log in to open the Admin dashboard. The dashboard shows live
 team progress and a **Team times** table with each configured team's elapsed
 time, per-round durations, penalties, and adjusted total. Round time starts on
 first entry and runs until the team completes that round, including time spent
-away. Unstarted teams and rounds are identified in the table. Use the Admin
+away, except during admin freezes. In **Dashboard → Team times**, select a
+team and round and use **Freeze selected round** to pause that round and the
+team's overall timer while the round is active. A round can be frozen before
+it starts; its freeze stops affecting the team total when the round finishes.
+Use **Freeze all timers** to pause every team and round, including timers
+started while the freeze is active. **Resume all timers** ends only the master
+freeze; individually frozen rounds remain frozen until resumed separately.
+Overlapping freezes are counted once. Penalties still apply. Freeze settings
+and elapsed times persist across refreshes and restarts. Below the table,
+**Reset game progress and time** can restart a selected team from a chosen
+round, restart an entire team, or restart all configured teams. A round reset
+also clears later rounds and their penalties, but keeps earlier progress and
+penalties. Every reset clears the affected teams' overall timers; they must
+start them again. Puzzle assignments and freeze settings are retained. The
+reset requires confirmation and cannot be undone. Unstarted teams and rounds
+are identified in the table. Use the Admin
 sidebar menu to navigate between game settings, teams, Round 1 places and
 coordinates, the editable round content, and Round 5 photo-submission reviews.
 Admin forms manage settings and content without editing raw JSON. Teams select
 their default names in the game screen and tell an admin their preferred names;
 admins can replace the names in the **Teams** section. Unchanged teams keep
-their default names. A team's login can also be released there when changing
-devices. **Game settings** also controls Round 4's free wrong answers per image
+their default names. **Game settings** also controls Round 4's free wrong answers per image
 and penalty per later wrong answer, Round 5's penalty for an incorrect photo
 review, and Round 6's free wrong answers per puzzle and penalty per later wrong
 answer. Penalties are configured in seconds; zero disables them. Round 5 has no
