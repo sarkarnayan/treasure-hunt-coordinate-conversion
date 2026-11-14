@@ -130,7 +130,8 @@ For Round 5, configure one or more venue reference photos and a code for each
 photo in **Round 5: The Hidden Lens**. Admins can choose the number of reference
 photos in the admin panel. Each team receives a unique photo while unique
 photos remain in the pool; photos are reused if the pool is smaller than the
-team count. Admins can capture a reference photo
+team count. Use **Delete reference photograph** to remove a photo from the pool.
+Admins can capture a reference photo
 with their device camera or choose an existing image. Each team is assigned a
 different reference photo at random. Teams capture or upload a photo showing
 all team members with the matching object; the associated code is revealed
