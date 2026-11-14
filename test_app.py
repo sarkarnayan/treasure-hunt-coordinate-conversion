@@ -1,3 +1,4 @@
+from contextlib import closing
 from io import BytesIO
 import json
 import os
@@ -853,7 +854,7 @@ class CoordinateLookupTests(unittest.TestCase):
                     )
                 )
 
-    def test_hidden_photograph_count_can_match_configured_team_count(self):
+    def test_hidden_photograph_pool_can_be_smaller_than_team_count(self):
         image_buffer = BytesIO()
         Image.new("RGB", (2, 2), "green").save(image_buffer, format="PNG")
         photograph = {"Image": image_buffer.getvalue(), "Code": "CODE"}
@@ -862,24 +863,192 @@ class CoordinateLookupTests(unittest.TestCase):
                 "app.ASSIGNMENT_DB_PATH",
                 Path(directory) / "hidden_photographs.sqlite3",
             ):
-                with patch("app.load_config", return_value={"teams": ["Team 1", "Team 2"]}):
-                    save_hidden_photograph_content([photograph] * 2, minimum_count=2)
-                    self.assertEqual(len(load_hidden_photograph_content()), 2)
-                    with self.assertRaisesRegex(ValueError, "at least 3"):
-                        save_hidden_photograph_content([photograph] * 2, minimum_count=3)
-                    with patch("app.random.choice", side_effect=lambda positions: positions[0]):
-                        first = get_hidden_photograph_state("Team 1")
-                        second = get_hidden_photograph_state("Team 2")
-                        self.assertNotEqual(
-                            first["photograph_position"],
-                            second["photograph_position"],
-                        )
-                        with self.assertRaisesRegex(ValueError, "No unassigned"):
-                            get_hidden_photograph_state("Team 3")
-                    incomplete_photographs = [dict(photograph) for _ in range(2)]
-                    incomplete_photographs[1]["Code"] = ""
+                save_hidden_photograph_content([photograph] * 2)
+                self.assertEqual(len(load_hidden_photograph_content()), 2)
+                with patch("app.random.choice", side_effect=lambda positions: positions[0]):
+                    first = get_hidden_photograph_state("Team 1")
+                    second = get_hidden_photograph_state("Team 2")
+                    third = get_hidden_photograph_state("Team 3")
+                self.assertNotEqual(
+                    first["photograph_position"],
+                    second["photograph_position"],
+                )
+                self.assertIn(
+                    third["photograph_position"],
+                    {first["photograph_position"], second["photograph_position"]},
+                )
+                incomplete_photograph = dict(photograph)
+                incomplete_photograph["Code"] = ""
                 with self.assertRaisesRegex(ValueError, "needs an image and a code"):
-                    save_hidden_photograph_content(incomplete_photographs, minimum_count=2)
+                    save_hidden_photograph_content([incomplete_photograph])
+
+    def test_existing_round_five_assignments_migrate_to_allow_photo_reuse(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "legacy_hidden_photographs.sqlite3"
+            with closing(sqlite3.connect(database_path)) as connection, connection:
+                connection.execute(
+                    """
+                    CREATE TABLE hidden_photographs (
+                        position INTEGER PRIMARY KEY,
+                        image BLOB NOT NULL,
+                        code TEXT NOT NULL
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    CREATE TABLE hidden_photograph_assignments (
+                        team TEXT PRIMARY KEY,
+                        photograph_position INTEGER NOT NULL UNIQUE,
+                        FOREIGN KEY (photograph_position)
+                            REFERENCES hidden_photographs (position)
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    CREATE TABLE hidden_photograph_submissions (
+                        team TEXT PRIMARY KEY,
+                        image BLOB NOT NULL,
+                        submitted_at REAL NOT NULL,
+                        reviewed_at REAL,
+                        is_correct INTEGER,
+                        penalty_seconds INTEGER NOT NULL DEFAULT 0,
+                        FOREIGN KEY (team)
+                            REFERENCES hidden_photograph_assignments (team)
+                    )
+                    """
+                )
+                connection.executemany(
+                    "INSERT INTO hidden_photographs VALUES (?, ?, ?)",
+                    [(1, b"photo-1", "CODE-1"), (2, b"photo-2", "CODE-2")],
+                )
+                connection.executemany(
+                    "INSERT INTO hidden_photograph_assignments VALUES (?, ?)",
+                    [("Team 1", 1), ("Team 2", 2)],
+                )
+                connection.execute(
+                    """
+                    INSERT INTO hidden_photograph_submissions
+                        (team, image, submitted_at)
+                    VALUES ('Team 1', ?, 100)
+                    """,
+                    (b"submission",),
+                )
+
+            with (
+                patch("app.ASSIGNMENT_DB_PATH", database_path),
+                patch("app.random.choice", side_effect=lambda positions: positions[0]),
+            ):
+                reused = get_hidden_photograph_state("Team 3")
+                existing = get_hidden_photograph_state("Team 1")
+                self.assertEqual(reused["photograph_position"], 1)
+                self.assertEqual(existing["submission_image"], b"submission")
+
+            with closing(sqlite3.connect(database_path)) as connection:
+                indexes = connection.execute(
+                    "PRAGMA index_list(hidden_photograph_assignments)"
+                ).fetchall()
+                unique_columns = [
+                    [
+                        column[2]
+                        for column in connection.execute(
+                            f'PRAGMA index_info("{index[1]}")'
+                        )
+                    ]
+                    for index in indexes
+                    if index[2]
+                ]
+            self.assertNotIn(["photograph_position"], unique_columns)
+
+    def test_round_five_admin_photo_count_can_be_below_team_count(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                patch(
+                    "app.ASSIGNMENT_DB_PATH",
+                    Path(directory) / "hidden_photographs.sqlite3",
+                ),
+                patch.dict(os.environ, {
+                    "TREASURE_HUNT_ADMIN_USER": "admin",
+                    "TREASURE_HUNT_ADMIN_PASSWORD": "test-password",
+                }),
+            ):
+                app = AppTest.from_string(
+                    "from app import main\nmain()", default_timeout=15
+                )
+                app.session_state.admin_authenticated = True
+                app.run()
+                app.sidebar.radio[0].set_value("Admin").run()
+                next(
+                    radio for radio in app.sidebar.radio
+                    if radio.label == "Admin menu"
+                ).set_value("Round 5: The Hidden Lens")
+                app.run()
+
+                self.assertFalse(app.exception)
+                photo_count = next(
+                    field for field in app.number_input
+                    if field.label == "Number of reference photographs"
+                )
+                self.assertEqual(photo_count.min, 1)
+                self.assertEqual(photo_count.value, 1)
+                photo_count.set_value(3).run()
+                self.assertFalse(app.exception)
+                photo_count = next(
+                    field for field in app.number_input
+                    if field.label == "Number of reference photographs"
+                )
+                self.assertEqual(photo_count.value, 3)
+
+    def test_round_five_admin_can_delete_a_reference_photo(self):
+        image_buffer = BytesIO()
+        Image.new("RGB", (2, 2), "green").save(image_buffer, format="PNG")
+        image_data = image_buffer.getvalue()
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                patch(
+                    "app.ASSIGNMENT_DB_PATH",
+                    Path(directory) / "hidden_photographs.sqlite3",
+                ),
+                patch.dict(os.environ, {
+                    "TREASURE_HUNT_ADMIN_USER": "admin",
+                    "TREASURE_HUNT_ADMIN_PASSWORD": "test-password",
+                }),
+            ):
+                save_hidden_photograph_content([
+                    {"Image": image_data, "Code": "CODE-1"},
+                    {"Image": image_data, "Code": "CODE-2"},
+                ])
+                app = AppTest.from_string(
+                    "from app import main\nmain()", default_timeout=15
+                )
+                app.session_state.admin_authenticated = True
+                app.run()
+                app.sidebar.radio[0].set_value("Admin").run()
+                next(
+                    radio for radio in app.sidebar.radio
+                    if radio.label == "Admin menu"
+                ).set_value("Round 5: The Hidden Lens")
+                app.run()
+
+                next(
+                    checkbox for checkbox in app.checkbox
+                    if checkbox.label == "Delete reference photograph 1"
+                ).check()
+                next(
+                    button for button in app.button
+                    if button.label == "Save Round 5 photographs"
+                ).click().run()
+
+                self.assertFalse(app.exception)
+                saved_photographs = load_hidden_photograph_content()
+                self.assertEqual(len(saved_photographs), 1)
+                self.assertEqual(saved_photographs[0]["Code"], "CODE-2")
+                photo_count = next(
+                    field for field in app.number_input
+                    if field.label == "Number of reference photographs"
+                )
+                self.assertEqual(photo_count.value, 1)
 
     def test_round_six_has_fifteen_cases_with_at_least_eight_characters_each(self):
         self.assertEqual(len(MURDER_MYSTERIES), 15)

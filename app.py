@@ -381,7 +381,7 @@ def create_database_tables(connection: sqlite3.Connection) -> None:
         """
         CREATE TABLE IF NOT EXISTS hidden_photograph_assignments (
             team TEXT PRIMARY KEY,
-            photograph_position INTEGER NOT NULL UNIQUE,
+            photograph_position INTEGER NOT NULL,
             FOREIGN KEY (photograph_position)
                 REFERENCES hidden_photographs (position)
         )
@@ -466,6 +466,68 @@ def create_database_tables(connection: sqlite3.Connection) -> None:
                 f"ALTER TABLE murder_mystery_progress ADD COLUMN "
                 f"{column} INTEGER NOT NULL DEFAULT 0"
             )
+    assignment_indexes = connection.execute(
+        "PRAGMA index_list(hidden_photograph_assignments)"
+    ).fetchall()
+    has_unique_photo_position = any(
+        index[2]
+        and [
+            column[2]
+            for column in connection.execute(
+                f'PRAGMA index_info("{index[1].replace(chr(34), chr(34) * 2)}")'
+            )
+        ] == ["photograph_position"]
+        for index in assignment_indexes
+    )
+    if has_unique_photo_position:
+        connection.execute(
+            """
+            CREATE TABLE hidden_photograph_assignments_new (
+                team TEXT PRIMARY KEY,
+                photograph_position INTEGER NOT NULL,
+                FOREIGN KEY (photograph_position)
+                    REFERENCES hidden_photographs (position)
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO hidden_photograph_assignments_new (team, photograph_position)
+            SELECT team, photograph_position FROM hidden_photograph_assignments
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE hidden_photograph_submissions_new (
+                team TEXT PRIMARY KEY,
+                image BLOB NOT NULL,
+                submitted_at REAL NOT NULL,
+                reviewed_at REAL,
+                is_correct INTEGER,
+                penalty_seconds INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY (team)
+                    REFERENCES hidden_photograph_assignments_new (team)
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO hidden_photograph_submissions_new
+                (team, image, submitted_at, reviewed_at, is_correct, penalty_seconds)
+            SELECT team, image, submitted_at, reviewed_at, is_correct, penalty_seconds
+            FROM hidden_photograph_submissions
+            """
+        )
+        connection.execute("DROP TABLE hidden_photograph_submissions")
+        connection.execute("DROP TABLE hidden_photograph_assignments")
+        connection.execute(
+            "ALTER TABLE hidden_photograph_assignments_new "
+            "RENAME TO hidden_photograph_assignments"
+        )
+        connection.execute(
+            "ALTER TABLE hidden_photograph_submissions_new "
+            "RENAME TO hidden_photograph_submissions"
+        )
 
 
 def load_hotel_detective_content() -> tuple[list[dict[str, Any]], list[str]]:
@@ -1030,11 +1092,10 @@ def ensure_hidden_photograph_assignment(
             "SELECT position FROM hidden_photographs ORDER BY position"
         )
     ]
-    required_count = len(load_config()["teams"])
-    if len(available_positions) < required_count:
+    if not available_positions:
         raise ValueError(
-            f"Round 5 needs at least {required_count} photographs for the configured "
-            "teams. Please ask an admin to configure it."
+            "Round 5 needs at least one configured photograph. "
+            "Please ask an admin to configure it."
         )
     assignment = connection.execute(
         """
@@ -1055,9 +1116,7 @@ def ensure_hidden_photograph_assignment(
     unused_positions = [
         position for position in available_positions if position not in used_positions
     ]
-    if not unused_positions:
-        raise ValueError("No unassigned Round 5 photographs remain.")
-    position = random.choice(unused_positions)
+    position = random.choice(unused_positions or available_positions)
     connection.execute(
         """
         INSERT INTO hidden_photograph_assignments (team, photograph_position)
@@ -3015,14 +3074,14 @@ def render_visual_puzzle_admin(st: Any) -> None:
             st.rerun()
 
 
-def render_hidden_photograph_admin(st: Any, team_count: int) -> None:
+def render_hidden_photograph_admin(st: Any) -> None:
     st.subheader(round_title(5))
     st.caption(
-        f"Upload at least {team_count} venue reference photos (one per team), "
-        "each with the code to reveal "
+        "Upload one or more venue reference photos, each with the code to reveal "
         "after a team submits its matching photo. Images must be JPEG, PNG, or "
         "WebP and 5 MB or smaller. Use camera capture or choose a photo from "
-        "your device."
+        "your device. Photos are assigned uniquely until the pool is used up; "
+        "they may be reused if there are fewer photos than teams."
     )
     try:
         photographs = load_hidden_photograph_content()
@@ -3030,15 +3089,18 @@ def render_hidden_photograph_admin(st: Any, team_count: int) -> None:
         st.error(f"Could not load Round 5 photographs: {error}")
         return
 
+    pending_count = st.session_state.pop(
+        "admin_hidden_photograph_count_pending", None
+    )
+    if pending_count is not None:
+        st.session_state.admin_hidden_photograph_count = pending_count
     if "admin_hidden_photograph_count" not in st.session_state:
         st.session_state.admin_hidden_photograph_count = max(
-            team_count, len(photographs)
+            HIDDEN_PHOTOGRAPH_MIN_COUNT, len(photographs)
         )
-    elif st.session_state.admin_hidden_photograph_count < team_count:
-        st.session_state.admin_hidden_photograph_count = team_count
     photograph_count = st.number_input(
         "Number of reference photographs",
-        min_value=team_count,
+        min_value=HIDDEN_PHOTOGRAPH_MIN_COUNT,
         step=1,
         key="admin_hidden_photograph_count",
     )
@@ -3049,10 +3111,17 @@ def render_hidden_photograph_admin(st: Any, team_count: int) -> None:
 
     with st.form("admin_hidden_photographs"):
         edited_photographs = []
+        deleted_positions = set()
         for position, photograph in enumerate(photograph_rows, start=1):
             st.markdown(f"**Reference photograph {position}**")
             if photograph["Image"]:
                 st.image(photograph["Image"], width=360)
+                if st.checkbox(
+                    f"Delete reference photograph {position}",
+                    key=f"admin_hidden_photo_delete_{position}",
+                ):
+                    deleted_positions.add(position)
+                    continue
             captured_image = st.camera_input(
                 f"Take reference photo {position}",
                 key=f"admin_hidden_photo_camera_{position}",
@@ -3095,19 +3164,23 @@ def render_hidden_photograph_admin(st: Any, team_count: int) -> None:
             and st.session_state.get(f"admin_hidden_photo_upload_{position}")
             is not None
             for position in range(1, photograph_count + 1)
+            if position not in deleted_positions
         ):
             st.error("Choose either a camera photo or an uploaded photo per entry.")
             return
         try:
-            save_hidden_photograph_content(edited_photographs, team_count)
+            save_hidden_photograph_content(edited_photographs)
         except (ValueError, TypeError, KeyError, sqlite3.Error) as error:
             st.error(f"Could not save Round 5 photographs: {error}")
         else:
             for position in range(1, photograph_count + 1):
-                for field in ("camera", "upload", "code"):
+                for field in ("camera", "upload", "code", "delete"):
                     st.session_state.pop(
                         f"admin_hidden_photo_{field}_{position}", None
                     )
+            st.session_state.admin_hidden_photograph_count_pending = len(
+                edited_photographs
+            )
             st.success("Round 5 photographs saved.")
             st.rerun()
 
@@ -4432,7 +4505,7 @@ def render_admin(st: Any, config: dict[str, Any]) -> None:
     elif admin_section == "Round 4: The Image Enigma":
         render_visual_puzzle_admin(st)
     elif admin_section == "Round 5: The Hidden Lens":
-        render_hidden_photograph_admin(st, len(config["teams"]))
+        render_hidden_photograph_admin(st)
     elif admin_section == "Round 5: The Hidden Lens - Photo submissions":
         render_hidden_photograph_reviews(st, config)
     elif admin_section == "Round 6: The Final Case: Mystery & Sudoku":
