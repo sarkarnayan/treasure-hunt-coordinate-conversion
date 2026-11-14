@@ -126,8 +126,10 @@ complete the round. Round 4 content, team selections, and progress are stored
 in `assignments.sqlite3`. Saving new Round 4 content resets all teams'
 Round 4 progress.
 
-For Round 5, configure at least 15 venue reference photos and a code for each
-photo in **Round 5: The Hidden Lens**. Admins can capture a reference photo
+For Round 5, configure at least one venue reference photo per configured team
+and a code for each photo in **Round 5: The Hidden Lens**. Admins can choose
+the number of reference photos in the admin panel; each team receives a unique
+photo. Admins can capture a reference photo
 with their device camera or choose an existing image. Each team is assigned a
 different reference photo at random. Teams capture or upload a photo showing
 all team members with the matching object; the associated code is revealed

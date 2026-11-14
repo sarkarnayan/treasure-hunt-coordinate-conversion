@@ -785,7 +785,8 @@ class CoordinateLookupTests(unittest.TestCase):
                 patch(
                     "app.load_config",
                     return_value={
-                        "round_penalties": {"5": {"penalty_seconds": 75}}
+                        "teams": ["Team 1"],
+                        "round_penalties": {"5": {"penalty_seconds": 75}},
                     },
                 ),
             ):
@@ -852,7 +853,7 @@ class CoordinateLookupTests(unittest.TestCase):
                     )
                 )
 
-    def test_hidden_photographs_require_at_least_fifteen_complete_entries(self):
+    def test_hidden_photograph_count_can_match_configured_team_count(self):
         image_buffer = BytesIO()
         Image.new("RGB", (2, 2), "green").save(image_buffer, format="PNG")
         photograph = {"Image": image_buffer.getvalue(), "Code": "CODE"}
@@ -861,12 +862,24 @@ class CoordinateLookupTests(unittest.TestCase):
                 "app.ASSIGNMENT_DB_PATH",
                 Path(directory) / "hidden_photographs.sqlite3",
             ):
-                with self.assertRaisesRegex(ValueError, "at least 15"):
-                    save_hidden_photograph_content([photograph] * 14)
-                incomplete_photographs = [dict(photograph) for _ in range(15)]
-                incomplete_photographs[4]["Code"] = ""
+                with patch("app.load_config", return_value={"teams": ["Team 1", "Team 2"]}):
+                    save_hidden_photograph_content([photograph] * 2, minimum_count=2)
+                    self.assertEqual(len(load_hidden_photograph_content()), 2)
+                    with self.assertRaisesRegex(ValueError, "at least 3"):
+                        save_hidden_photograph_content([photograph] * 2, minimum_count=3)
+                    with patch("app.random.choice", side_effect=lambda positions: positions[0]):
+                        first = get_hidden_photograph_state("Team 1")
+                        second = get_hidden_photograph_state("Team 2")
+                        self.assertNotEqual(
+                            first["photograph_position"],
+                            second["photograph_position"],
+                        )
+                        with self.assertRaisesRegex(ValueError, "No unassigned"):
+                            get_hidden_photograph_state("Team 3")
+                    incomplete_photographs = [dict(photograph) for _ in range(2)]
+                    incomplete_photographs[1]["Code"] = ""
                 with self.assertRaisesRegex(ValueError, "needs an image and a code"):
-                    save_hidden_photograph_content(incomplete_photographs)
+                    save_hidden_photograph_content(incomplete_photographs, minimum_count=2)
 
     def test_round_six_has_fifteen_cases_with_at_least_eight_characters_each(self):
         self.assertEqual(len(MURDER_MYSTERIES), 15)

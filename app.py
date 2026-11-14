@@ -33,7 +33,7 @@ VISUAL_PUZZLE_FREE_ATTEMPTS = 3
 VISUAL_PUZZLE_PENALTY_SECONDS = 120
 VISUAL_PUZZLE_MAX_IMAGE_BYTES = 5 * 1024 * 1024
 VISUAL_PUZZLE_MAX_IMAGE_PIXELS = 20_000_000
-HIDDEN_PHOTOGRAPH_MIN_COUNT = 15
+HIDDEN_PHOTOGRAPH_MIN_COUNT = 1
 HIDDEN_PHOTOGRAPH_PENALTY_SECONDS = 120
 HOTEL_DETECTIVE_FREE_ATTEMPTS = 3
 HOTEL_DETECTIVE_PENALTY_SECONDS = 120
@@ -983,10 +983,13 @@ def load_hidden_photograph_content() -> list[dict[str, Any]]:
     ]
 
 
-def save_hidden_photograph_content(photographs: list[dict[str, Any]]) -> None:
-    if len(photographs) < HIDDEN_PHOTOGRAPH_MIN_COUNT:
+def save_hidden_photograph_content(
+    photographs: list[dict[str, Any]],
+    minimum_count: int = HIDDEN_PHOTOGRAPH_MIN_COUNT,
+) -> None:
+    if len(photographs) < minimum_count:
         raise ValueError(
-            f"Round 5 requires at least {HIDDEN_PHOTOGRAPH_MIN_COUNT} photographs."
+            f"Round 5 requires at least {minimum_count} photographs."
         )
 
     normalized_photographs: list[tuple[int, bytes, str]] = []
@@ -1027,9 +1030,11 @@ def ensure_hidden_photograph_assignment(
             "SELECT position FROM hidden_photographs ORDER BY position"
         )
     ]
-    if len(available_positions) < HIDDEN_PHOTOGRAPH_MIN_COUNT:
+    required_count = len(load_config()["teams"])
+    if len(available_positions) < required_count:
         raise ValueError(
-            "Round 5 needs at least 15 photographs. Please ask an admin to configure it."
+            f"Round 5 needs at least {required_count} photographs for the configured "
+            "teams. Please ask an admin to configure it."
         )
     assignment = connection.execute(
         """
@@ -3010,10 +3015,11 @@ def render_visual_puzzle_admin(st: Any) -> None:
             st.rerun()
 
 
-def render_hidden_photograph_admin(st: Any) -> None:
+def render_hidden_photograph_admin(st: Any, team_count: int) -> None:
     st.subheader(round_title(5))
     st.caption(
-        "Upload at least 15 venue reference photos, each with the code to reveal "
+        f"Upload at least {team_count} venue reference photos (one per team), "
+        "each with the code to reveal "
         "after a team submits its matching photo. Images must be JPEG, PNG, or "
         "WebP and 5 MB or smaller. Use camera capture or choose a photo from "
         "your device."
@@ -3026,11 +3032,13 @@ def render_hidden_photograph_admin(st: Any) -> None:
 
     if "admin_hidden_photograph_count" not in st.session_state:
         st.session_state.admin_hidden_photograph_count = max(
-            HIDDEN_PHOTOGRAPH_MIN_COUNT, len(photographs)
+            team_count, len(photographs)
         )
+    elif st.session_state.admin_hidden_photograph_count < team_count:
+        st.session_state.admin_hidden_photograph_count = team_count
     photograph_count = st.number_input(
         "Number of reference photographs",
-        min_value=HIDDEN_PHOTOGRAPH_MIN_COUNT,
+        min_value=team_count,
         step=1,
         key="admin_hidden_photograph_count",
     )
@@ -3091,7 +3099,7 @@ def render_hidden_photograph_admin(st: Any) -> None:
             st.error("Choose either a camera photo or an uploaded photo per entry.")
             return
         try:
-            save_hidden_photograph_content(edited_photographs)
+            save_hidden_photograph_content(edited_photographs, team_count)
         except (ValueError, TypeError, KeyError, sqlite3.Error) as error:
             st.error(f"Could not save Round 5 photographs: {error}")
         else:
@@ -3822,33 +3830,34 @@ def render_murder_mystery(
             puzzle = case["sudoku_puzzle"]
             puzzle_key = hashlib.sha256(puzzle.encode("ascii")).hexdigest()[:12]
             grid_values: list[list[Optional[int]]] = []
-            with st.form("murder_mystery_sudoku"):
-                for row_index in range(SUDOKU_SIZE):
-                    grid_row = []
-                    cell_columns = st.columns(SUDOKU_SIZE, gap="small")
-                    for column_index, column in enumerate(cell_columns):
-                        clue = puzzle[
-                            row_index * SUDOKU_SIZE + column_index
-                        ]
-                        with column:
-                            value = st.number_input(
-                                f"Row {row_index + 1}, column {column_index + 1}",
-                                min_value=1,
-                                max_value=SUDOKU_SIZE,
-                                value=int(clue) if clue != "0" else None,
-                                step=1,
-                                key=(
-                                    f"round6_sudoku_{team}_{puzzle_key}_"
-                                    f"{row_index}_{column_index}"
-                                ),
-                                label_visibility="collapsed",
-                                disabled=clue != "0",
-                            )
-                        grid_row.append(value)
-                    grid_values.append(grid_row)
-                submitted = st.form_submit_button(
-                    "Check Sudoku", type="primary"
-                )
+            with st.container(key="round6_sudoku"):
+                with st.form("murder_mystery_sudoku"):
+                    for row_index in range(SUDOKU_SIZE):
+                        grid_row = []
+                        cell_columns = st.columns(SUDOKU_SIZE, gap="small")
+                        for column_index, column in enumerate(cell_columns):
+                            clue = puzzle[
+                                row_index * SUDOKU_SIZE + column_index
+                            ]
+                            with column:
+                                value = st.number_input(
+                                    f"Row {row_index + 1}, column {column_index + 1}",
+                                    min_value=1,
+                                    max_value=SUDOKU_SIZE,
+                                    value=int(clue) if clue != "0" else None,
+                                    step=1,
+                                    key=(
+                                        f"round6_sudoku_{team}_{puzzle_key}_"
+                                        f"{row_index}_{column_index}"
+                                    ),
+                                    label_visibility="collapsed",
+                                    disabled=clue != "0",
+                                )
+                            grid_row.append(value)
+                        grid_values.append(grid_row)
+                    submitted = st.form_submit_button(
+                        "Check Sudoku", type="primary"
+                    )
             if submitted:
                 if any(value is None for row in grid_values for value in row):
                     st.warning("Fill every blank cell before checking the Sudoku.")
@@ -4423,7 +4432,7 @@ def render_admin(st: Any, config: dict[str, Any]) -> None:
     elif admin_section == "Round 4: The Image Enigma":
         render_visual_puzzle_admin(st)
     elif admin_section == "Round 5: The Hidden Lens":
-        render_hidden_photograph_admin(st)
+        render_hidden_photograph_admin(st, len(config["teams"]))
     elif admin_section == "Round 5: The Hidden Lens - Photo submissions":
         render_hidden_photograph_reviews(st, config)
     elif admin_section == "Round 6: The Final Case: Mystery & Sudoku":
@@ -4466,6 +4475,37 @@ def main() -> None:
         div[data-testid="stButton"] > button p,
         div[data-testid="stFormSubmitButton"] > button p {
             margin: 0;
+        }
+
+        @media (max-width: 640px) {
+            div[data-testid="stHorizontalBlock"]:has(
+                > div[data-testid="stColumn"] .st-key-round6_sudoku
+            ) {
+                flex-direction: column;
+            }
+
+            div[data-testid="stHorizontalBlock"]:has(
+                > div[data-testid="stColumn"] .st-key-round6_sudoku
+            ) > div[data-testid="stColumn"] {
+                width: 100% !important;
+                min-width: 100% !important;
+                flex: 1 1 100% !important;
+            }
+
+            .st-key-round6_sudoku div[data-testid="stHorizontalBlock"] {
+                gap: 0.25rem;
+            }
+
+            .st-key-round6_sudoku div[data-testid="stColumn"] {
+                min-width: 0 !important;
+            }
+
+            .st-key-round6_sudoku div[data-testid="stNumberInput"] input {
+                min-height: 44px;
+                padding-left: 0.25rem;
+                padding-right: 0.25rem;
+                text-align: center;
+            }
         }
         </style>
         """,
